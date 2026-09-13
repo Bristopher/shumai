@@ -27,6 +27,7 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
       shareId,
       children,
       allowDownload,
+      autoPlay,
     },
     ref,
   ) => {
@@ -144,7 +145,7 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
       setIsPlayerReady(false)
       setBuffered(0)
       lastProcessedStartTimeRef.current = null
-    }, [data.id])
+    }, [data.id, Boolean(initialRes?.url)])
 
     const vidW = data.media?.metadata?.originalWidth || 1920
     const vidH = data.media?.metadata?.originalHeight || 1080
@@ -304,6 +305,30 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
         ],
       }))
 
+      if (autoPlay) {
+        const startAutoPlay = () => {
+          if (player.isDisposed()) return
+          const playPromise = player.play()
+          if (playPromise !== undefined) {
+            playPromise.catch(() => {
+              if (player.isDisposed()) return
+              player.muted(true)
+              setState((prev) => ({ ...prev, isMuted: true }))
+              player.play()?.catch(() => {})
+            })
+          }
+        }
+
+        player.ready(() => {
+          if (player.isDisposed()) return
+          if (player.readyState() >= 2) {
+            startAutoPlay()
+          } else {
+            player.one('canplay', startAutoPlay)
+          }
+        })
+      }
+
       // Extract video element for Konva
       const htmlVid = videoElement.querySelector('video')
       if (htmlVid) {
@@ -378,7 +403,7 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
           videoRef.current = null
         }
       }
-    }, [data.id])
+    }, [data.id, Boolean(initialRes?.url), autoPlay])
 
     // Handle changes to startTime (e.g., clicking different chunks in search results)
     useEffect(() => {
