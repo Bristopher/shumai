@@ -37,6 +37,8 @@ Shumai is an open-source Frame.io alternative built for creative teams to collab
 
 But Shumai goes beyond being a Frame.io alternative. With modern models like GPT-Image-2 and Seedance 2.5, AI can already handle a surprising amount of creative work. That means you can create or update videos and images from a simple prompt without having to jump back into Photoshop, Premiere or Houdini. That is why Shumai includes a powerful agent system:
 
+> **AI is optional.** You can use Shumai as a traditional Frame.io alternative and completely ignore the AI features if they aren't useful for your team.
+
 * **Agent as a Team Member**: Mention a context-aware AI agent with `@mentions` directly in asset comments, just like a real teammate.
 * **Agent as a One-to-One Assistant**: Chat privately with the agent and ask it to help with tasks.
 * **Custom Skills & Tools**: Extend the agent by registering custom scripts, tools, and automation skills.
