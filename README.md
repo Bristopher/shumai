@@ -5,7 +5,7 @@
 <h1 align="center">Shumai</h1>
 
 <p align="center">
-  <strong>An open-source platform for all your creative work.</strong>
+  <strong>The best open-source Frame.io alternative for all your creative work.</strong>
 </p>
 
 <p align="center">
