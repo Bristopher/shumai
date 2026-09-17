@@ -5,7 +5,7 @@ import type { LinkedSequenceAsset } from '../types/link'
 import { getActiveProject, getAllSequences, getActiveSequence } from '../services/premiere'
 import { getAllLinkedSequences, normalizeGuid, removeSequenceLink } from '../services/linkStorage'
 import { fetchAssetComments, syncCommentsToSequence } from '../services/markers'
-import { resolveAssetUrl } from '../utils/url'
+import { resolveAssetUrl, isSameEndpoint } from '../utils/url'
 import { formatBytes, formatDuration } from '../utils/format'
 import { ProgressCircle } from '@swc-react/progress-circle'
 
@@ -91,7 +91,9 @@ export const LinkSequenceDialog: React.FC<LinkSequenceDialogProps> = ({
         const activeGuid = normalizeGuid(activeSeq?.guid)
         const linksMap = new Map<string, LinkedSequenceAsset>()
         for (const link of existingLinks) {
-          linksMap.set(normalizeGuid(link.sequenceGuid), link)
+          if (!link.endpoint || isSameEndpoint(link.endpoint, endpoint)) {
+            linksMap.set(normalizeGuid(link.sequenceGuid), link)
+          }
         }
 
         const options: SequenceOption[] = allSeqs.map((seq) => {
@@ -129,7 +131,7 @@ export const LinkSequenceDialog: React.FC<LinkSequenceDialogProps> = ({
     return () => {
       isMounted = false
     }
-  }, [isOpen, asset])
+  }, [isOpen, asset, endpoint])
 
   // Escape key handler
   useEffect(() => {
@@ -170,6 +172,7 @@ export const LinkSequenceDialog: React.FC<LinkSequenceDialogProps> = ({
         assetId: asset.id,
         assetName: asset.name,
         assetThumbnailUrl: asset.preview?.thumbnailUrl,
+        endpoint: endpoint.trim().replace(/\/+$/, ''),
         projectId: prGuidStr,
         syncedCommentIds:
           targetOption.currentLink?.assetId === asset.id
@@ -312,11 +315,6 @@ export const LinkSequenceDialog: React.FC<LinkSequenceDialogProps> = ({
                   }}
                 >
                   <div className="shumai-option-left">
-                    <sp-icon-filmstrip
-                      size="s"
-                      className="shumai-option-icon"
-                      style={{ color: '#3b82f6' }}
-                    ></sp-icon-filmstrip>
                     <div className="shumai-option-texts">
                       <div style={{ display: 'flex', alignItems: 'center' }}>
                         <span className="shumai-option-title">{opt.name}</span>

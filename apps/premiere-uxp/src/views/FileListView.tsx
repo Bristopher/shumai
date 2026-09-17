@@ -15,6 +15,7 @@ import { getActiveProject, getAllSequences } from '../services/premiere'
 import type { LinkedSequenceAsset } from '../types/link'
 import { importAssetIntoPremiere, type ProxyOption } from '../services/import'
 import { ProjectSummary } from './ProjectsView'
+import { isSameEndpoint } from '../utils/url'
 import { ActionButton } from '@swc-react/action-button'
 import { Button } from '@swc-react/button'
 import { Search } from '@swc-react/search'
@@ -75,10 +76,12 @@ export const FileListView: React.FC<FileListViewProps> = ({
     if (cachedLinks.length > 0) {
       const map: Record<string, LinkedSequenceAsset> = {}
       for (const link of cachedLinks) {
-        map[link.assetId] = link
+        if (!link.endpoint || isSameEndpoint(link.endpoint, endpoint)) {
+          map[link.assetId] = link
+        }
       }
       setLinkedAssetsMap((prev) => ({ ...prev, ...map }))
-      onLinkCountChange?.(cachedLinks.length)
+      onLinkCountChange?.(Object.keys(map).length)
     }
 
     // 2. Query active project in Premiere Pro for live persistent links
@@ -88,15 +91,17 @@ export const FileListView: React.FC<FileListViewProps> = ({
         const liveLinks = await getAllLinkedSequences(pr)
         const liveMap: Record<string, LinkedSequenceAsset> = {}
         for (const link of liveLinks) {
-          liveMap[link.assetId] = link
+          if (!link.endpoint || isSameEndpoint(link.endpoint, endpoint)) {
+            liveMap[link.assetId] = link
+          }
         }
         setLinkedAssetsMap(liveMap)
-        onLinkCountChange?.(liveLinks.length)
+        onLinkCountChange?.(Object.keys(liveMap).length)
       }
     } catch (err) {
       console.warn('[FileListView] Could not get linked sequences from active project:', err)
     }
-  }, [onLinkCountChange])
+  }, [endpoint, onLinkCountChange])
 
   useEffect(() => {
     void refreshLinkedAssets()
