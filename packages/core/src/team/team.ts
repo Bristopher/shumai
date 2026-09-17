@@ -19,6 +19,7 @@ import {
   UserInfo,
   SandboxSettings,
   UpdateSandboxSettingsRequest,
+  TeamSettingsResponse,
 } from '@shumai/dtos'
 
 export class TeamService {
@@ -288,53 +289,65 @@ export class TeamService {
     })
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async getSettings(teamId: string): Promise<any> {
+  async getSettings(teamId: string): Promise<TeamSettingsResponse> {
     const team = await prisma.team.findUnique({
       where: { id: teamId },
     })
     if (!team) throw new HTTPException(404, { message: 'team not found' })
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const settings = (team.settings || {}) as any
+    const settings = (team.settings || {}) as TeamSettingsResponse
 
     const embeddingAgent = await prisma.agent.findFirst({
       where: { teamId, type: 'embedding', enabled: true },
     })
     settings.semanticSearchEnabled = !!embeddingAgent
 
+    if (!settings.appearance) {
+      settings.appearance = { hideAgent: false }
+    } else if (settings.appearance.hideAgent === undefined) {
+      settings.appearance.hideAgent = false
+    }
+
     return settings
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async updateSettings(teamId: string, key: string, value: any): Promise<any> {
+  async updateSettings(teamId: string, key: string, value: unknown): Promise<TeamSettingsResponse> {
     const team = await prisma.team.findUnique({ where: { id: teamId } })
     if (!team) throw new HTTPException(404, { message: 'team not found' })
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const settings = (team.settings || {}) as any
+    const settings = (team.settings || {}) as TeamSettingsResponse
 
     if (key === 'transcode.videoStrategy') {
       if (!settings.transcode) {
         settings.transcode = {}
       }
-      settings.transcode.videoStrategy = value
+      settings.transcode.videoStrategy = value as NonNullable<
+        TeamSettingsResponse['transcode']
+      >['videoStrategy']
       delete settings['transcode.videoStrategy']
     } else if (key === 'transcode.hardwareAcceleration') {
       if (!settings.transcode) {
         settings.transcode = {}
       }
-      settings.transcode.hardwareAcceleration = value
+      settings.transcode.hardwareAcceleration = value as NonNullable<
+        TeamSettingsResponse['transcode']
+      >['hardwareAcceleration']
       delete settings['transcode.hardwareAcceleration']
+    } else if (key === 'appearance.hideAgent') {
+      if (!settings.appearance) {
+        settings.appearance = {}
+      }
+      settings.appearance.hideAgent = Boolean(value)
+      delete settings['appearance.hideAgent']
     } else {
       settings[key] = value
     }
 
     const updated = await prisma.team.update({
       where: { id: teamId },
-      data: { settings },
+      data: { settings: settings as unknown as PrismaJson.Settings },
     })
 
-    return updated.settings || {}
+    return (updated.settings || {}) as TeamSettingsResponse
   }
 
   async getSandboxSettings(teamId: string): Promise<SandboxSettings> {
