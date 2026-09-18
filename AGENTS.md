@@ -14,9 +14,10 @@ Complete the task on that branch.
 
 After finishing the work and verifying that all checks pass:
 
-1. Stage and commit your changes.
-2. Push the branch to `origin`.
-3. Open a pull request using the GitHub CLI.
+1. Update `CHANGELOG.md` under `## [Unreleased]` for user-facing changes (see [Changelog Guidelines](#changelog-guidelines)).
+2. Stage and commit your changes.
+3. Push the branch to `origin`.
+4. Open a pull request using the GitHub CLI.
 
 ```bash
 git add .
@@ -58,6 +59,19 @@ Write commit messages in the imperative mood and keep descriptions concise and s
 
 Reference:
 https://www.conventionalcommits.org/en/v1.0.0/#summary
+
+---
+
+## Changelog Guidelines
+
+We maintain `CHANGELOG.md` following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+Before opening a pull request, add an entry under `## [Unreleased]` for any user-facing changes:
+
+- **Focus on User Impact**: Describe the user-facing outcome or observable behavior in plain terms, not internal code mechanics, file paths, or private symbols.
+- **Formatting**: `- **<scope>**: <Description>` (e.g. `- **comment**: Add emoji reaction support for comments`).
+- **No PR Numbers**: Do not include PR numbers or links; the release pipeline automatically appends the detailed PR list.
+- **Internal Changes**: Routine refactors, test additions, or internal chores without external behavior changes may omit changelog updates.
 
 ---
 
