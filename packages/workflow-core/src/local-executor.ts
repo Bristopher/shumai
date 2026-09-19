@@ -2,8 +2,15 @@ import { prisma } from '@shumai/db'
 import { WorkflowTask, WorkflowTaskStatus } from '@shumai/db'
 import { Executor } from './executor'
 import * as taskActivities from './activities/task'
+import {
+  getConcurrencyLimit,
+  registerLocalTaskAbortController,
+  runInLocalTaskContext,
+  triggerLocalCancel,
+  unregisterLocalTaskAbortController,
+} from './workflow-utils'
 import { logger } from '@shumai/core/src/logger'
-import { getConcurrencyLimit, triggerLocalCancel } from './workflow-utils'
+import './local-task-storage'
 
 type WorkflowFn = (task: WorkflowTask) => Promise<void>
 
@@ -30,6 +37,7 @@ export function registerActivities(acts: Record<string, unknown>) {
 globalObj.__localActivities = activityRegistry
 globalObj.__localLogger = logger
 
+// ConcurrencyLimiter manages concurrent execution of promises with a FIFO queue.
 export class ConcurrencyLimiter {
   private activeCount = 0
   private queue: (() => void)[] = []
@@ -72,6 +80,7 @@ export class ConcurrencyLimiter {
 export class LocalExecutor implements Executor {
   private interval: Timer | null = null
   private processingTasks = new Set<string>()
+  private heartbeatIntervals = new Map<string, Timer>()
 
   private transcodeLimiter: ConcurrencyLimiter
   private generalLimiter: ConcurrencyLimiter
@@ -94,7 +103,7 @@ export class LocalExecutor implements Executor {
 
   async submit(task: WorkflowTask): Promise<string> {
     if (task.status !== WorkflowTaskStatus.pending) {
-      await prisma.workflowTask.update({
+      await prisma.workflowTask.updateMany({
         where: { id: task.id },
         data: { status: WorkflowTaskStatus.pending },
       })
@@ -135,14 +144,26 @@ export class LocalExecutor implements Executor {
         // 2. Start heartbeat updater immediately
         const heartbeatInterval = setInterval(async () => {
           try {
-            await prisma.workflowTask.update({
+            const { count } = await prisma.workflowTask.updateMany({
               where: { id: task.id },
               data: { heartbeat: new Date() },
             })
+            if (count === 0) {
+              clearInterval(heartbeatInterval)
+              this.heartbeatIntervals.delete(task.id)
+              logger.debug(
+                { taskId: task.id },
+                '[LocalExecutor] Stopped heartbeat for deleted or cancelled task',
+              )
+            }
           } catch (err) {
             console.error(`[LocalExecutor] Failed to update heartbeat for task ${task.id}:`, err)
           }
         }, 5000)
+        this.heartbeatIntervals.set(task.id, heartbeatInterval)
+
+        const abortController = new AbortController()
+        registerLocalTaskAbortController(task.id, abortController)
 
         const limiter =
           task.type && task.type.startsWith('transcode')
@@ -152,10 +173,32 @@ export class LocalExecutor implements Executor {
         limiter
           .run(async () => {
             try {
-              await this.processTaskWrapper(task)
+              if (abortController.signal.aborted) {
+                logger.info(
+                  { taskId: task.id },
+                  '[LocalExecutor] Queued task was aborted before execution',
+                )
+                try {
+                  await prisma.workflowTask.updateMany({
+                    where: { id: task.id, status: WorkflowTaskStatus.processing },
+                    data: {
+                      status: WorkflowTaskStatus.failed,
+                      output: { error: 'Workflow task was cancelled before execution' },
+                    },
+                  })
+                } catch {
+                  // Ignore if task was already deleted
+                }
+                return
+              }
+              await runInLocalTaskContext({ taskId: task.id, abortController }, async () => {
+                await this.processTaskWrapper(task)
+              })
             } finally {
               // 3. Clean up the heartbeat updater and processing set when the task finishes
               clearInterval(heartbeatInterval)
+              this.heartbeatIntervals.delete(task.id)
+              unregisterLocalTaskAbortController(task.id)
               this.processingTasks.delete(task.id)
             }
           })
@@ -168,7 +211,13 @@ export class LocalExecutor implements Executor {
   }
 
   async cancel(taskId: string): Promise<void> {
+    const timer = this.heartbeatIntervals.get(taskId)
+    if (timer) {
+      clearInterval(timer)
+      this.heartbeatIntervals.delete(taskId)
+    }
     triggerLocalCancel(taskId)
+    logger.info({ taskId }, '[LocalExecutor] Cancelled workflow task')
   }
 
   start(): void {
@@ -181,6 +230,13 @@ export class LocalExecutor implements Executor {
       clearInterval(this.interval)
       this.interval = null
     }
+    for (const timer of this.heartbeatIntervals.values()) {
+      clearInterval(timer)
+    }
+    this.heartbeatIntervals.clear()
+    for (const taskId of this.processingTasks) {
+      triggerLocalCancel(taskId)
+    }
   }
 
   // Returns the array of task promises so tests can await them to avoid early rollback.
@@ -188,6 +244,10 @@ export class LocalExecutor implements Executor {
     const promises: Promise<void>[] = []
     try {
       const staleTime = new Date(Date.now() - 30 * 1000)
+
+      // Find tasks that are:
+      // 1. Pending (new tasks)
+      // 2. Processing but stale (worker crashed, heartbeat > 30s ago)
       const tasks = await prisma.workflowTask.findMany({
         where: {
           OR: [
@@ -198,6 +258,7 @@ export class LocalExecutor implements Executor {
             },
           ],
         },
+        orderBy: { id: 'asc' },
         take: 50,
       })
 
@@ -206,8 +267,7 @@ export class LocalExecutor implements Executor {
         this.processingTasks.add(task.id)
 
         // 1. Immediately mark task as processing and set initial heartbeat in DB
-        // to guarantee no other ticks/replicas can double-query it.
-        // We use updateMany to atomically claim it only if it is still pending or stale.
+        // atomically, ensuring no two workers pick up the same task.
         try {
           const affected = await prisma.workflowTask.updateMany({
             where: {
@@ -230,23 +290,38 @@ export class LocalExecutor implements Executor {
             continue
           }
         } catch (err) {
-          console.error(`[LocalExecutor] Failed to mark task ${task.id} as processing:`, err)
+          console.error(
+            `[LocalExecutor] Failed to mark task ${task.id} as processing in tick:`,
+            err,
+          )
           this.processingTasks.delete(task.id)
           continue
         }
 
-        // 2. Start heartbeat updater immediately so it updates heartbeat
+        // 2. Start heartbeat updater immediately to prevent other workers from considering it stale
         // even while the task is queued waiting for limiter capacity.
         const heartbeatInterval = setInterval(async () => {
           try {
-            await prisma.workflowTask.update({
+            const { count } = await prisma.workflowTask.updateMany({
               where: { id: task.id },
               data: { heartbeat: new Date() },
             })
+            if (count === 0) {
+              clearInterval(heartbeatInterval)
+              this.heartbeatIntervals.delete(task.id)
+              logger.debug(
+                { taskId: task.id },
+                '[LocalExecutor] Stopped heartbeat for deleted or cancelled task',
+              )
+            }
           } catch (err) {
             console.error(`[LocalExecutor] Failed to update heartbeat for task ${task.id}:`, err)
           }
         }, 5000)
+        this.heartbeatIntervals.set(task.id, heartbeatInterval)
+
+        const abortController = new AbortController()
+        registerLocalTaskAbortController(task.id, abortController)
 
         const limiter =
           task.type && task.type.startsWith('transcode')
@@ -256,10 +331,32 @@ export class LocalExecutor implements Executor {
         const promise = limiter
           .run(async () => {
             try {
-              await this.processTaskWrapper(task)
+              if (abortController.signal.aborted) {
+                logger.info(
+                  { taskId: task.id },
+                  '[LocalExecutor] Queued task was aborted before execution',
+                )
+                try {
+                  await prisma.workflowTask.updateMany({
+                    where: { id: task.id, status: WorkflowTaskStatus.processing },
+                    data: {
+                      status: WorkflowTaskStatus.failed,
+                      output: { error: 'Workflow task was cancelled before execution' },
+                    },
+                  })
+                } catch {
+                  // Ignore if task was already deleted
+                }
+                return
+              }
+              await runInLocalTaskContext({ taskId: task.id, abortController }, async () => {
+                await this.processTaskWrapper(task)
+              })
             } finally {
               // 3. Clean up the heartbeat updater and processing set when the task finishes
               clearInterval(heartbeatInterval)
+              this.heartbeatIntervals.delete(task.id)
+              unregisterLocalTaskAbortController(task.id)
               this.processingTasks.delete(task.id)
             }
           })
@@ -285,7 +382,7 @@ export class LocalExecutor implements Executor {
     } catch (err) {
       console.error(`Error in workflow ${task.type} for task ${task.id}:`, err)
       try {
-        await prisma.workflowTask.update({
+        await prisma.workflowTask.updateMany({
           where: { id: task.id },
           data: {
             status: WorkflowTaskStatus.failed,

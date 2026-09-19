@@ -68,6 +68,7 @@ export async function transcodeVideoWorkflow(task: WorkflowTask): Promise<void> 
       const posterResult = await executeActivity(workerQueue, extractPosterActivity, {
         assetKey: key,
         posterSpec,
+        taskId: task.id,
       })
       mediaInfo.poster = posterResult.poster
       await executeActivity(workerQueue, updateAssetMediaActivity, {
@@ -98,6 +99,7 @@ export async function transcodeVideoWorkflow(task: WorkflowTask): Promise<void> 
         }
 
         const videoTranscode = await executeActivity(workerQueue, transcodeVideoActivity, {
+          taskId: task.id,
           assetKey: key,
           filePath,
           videoSpec,
@@ -119,6 +121,7 @@ export async function transcodeVideoWorkflow(task: WorkflowTask): Promise<void> 
     const isAudio = mediaInfo.proxyType === 'audio'
     if (isAudio && metadata) {
       const audioTranscode = await executeActivity(workerQueue, transcodeAudioActivity, {
+        taskId: task.id,
         assetKey: key,
         filePath,
         threads: spec.threads,
@@ -150,6 +153,7 @@ export async function transcodeVideoWorkflow(task: WorkflowTask): Promise<void> 
       }
 
       const spriteResult = await executeActivity(workerQueue, generateSpriteActivity, {
+        taskId: task.id,
         assetKey: key,
         filePath,
         spriteSpec,

@@ -1,4 +1,4 @@
-import { prisma, WorkflowTaskType, WorkflowTaskStatus } from '@shumai/db'
+import { AssetStatus, prisma, WorkflowTaskType, WorkflowTaskStatus } from '@shumai/db'
 import { s3Service } from '@shumai/core/src/s3/s3'
 import { transcodeService } from '@shumai/core/src/transcode/transcode'
 import { metadataService } from '@shumai/core/src/metadata/metadata'
@@ -12,7 +12,17 @@ import {
   isMarkdownDocument,
   isOfficeDocument,
 } from '@shumai/core/src/utils/mime'
-import { ApplicationFailure } from '@temporalio/activity'
+import { logger } from '@shumai/core/src/logger'
+import { ApplicationFailure, Context } from '@temporalio/activity'
+import { getLocalTaskAbortSignal } from '@shumai/workflow-core'
+
+function getActivityCancellationSignal(taskId?: string): AbortSignal | undefined {
+  try {
+    return Context.current().cancellationSignal
+  } catch {
+    return getLocalTaskAbortSignal(taskId)
+  }
+}
 import * as path from 'path'
 import * as fs from 'fs'
 import * as os from 'os'
@@ -44,6 +54,24 @@ function getErrorDetails(err: unknown): { code?: string; message: string; name?:
   }
   return {
     message: String(err),
+  }
+}
+
+async function ensureAssetNotPurging(assetKey: string): Promise<void> {
+  const sk = await prisma.storageKey.findUnique({
+    where: { key: assetKey },
+    include: { assets: { select: { id: true, status: true } } },
+  })
+  if (
+    sk &&
+    (sk.status === 'purging' ||
+      sk.assets.length === 0 ||
+      sk.assets.every((a) => a.status === AssetStatus.pending_purge))
+  ) {
+    throw ApplicationFailure.create({
+      message: 'Asset or storage key has been purged or is pending purge',
+      nonRetryable: true,
+    })
   }
 }
 
@@ -216,6 +244,7 @@ export async function getMediaInfoActivity(params: {
 }
 
 export interface VideoActivityParams {
+  taskId?: string
   assetKey: string
   filePath: string
   videoSpec: PrismaJson.VideoTranscode
@@ -233,6 +262,14 @@ export async function transcodeVideoActivity(
   const stem = stemFromKey(params.assetKey)
   const res = params.videoSpec.resolution || `${params.videoSpec.height}p`
   const key = path.posix.join(path.posix.dirname(params.assetKey), `${stem}-${res}.mp4`)
+
+  const signal = getActivityCancellationSignal(params.taskId)
+  if (signal?.aborted) {
+    throw ApplicationFailure.create({
+      message: 'Video transcoding cancelled',
+      nonRetryable: true,
+    })
+  }
 
   try {
     await s3Service.headObject(bucket, key)
@@ -269,16 +306,31 @@ export async function transcodeVideoActivity(
       hardwareAcceleration: params.hardwareAcceleration,
       sourceVideoBitrate: params.sourceVideoBitrate,
       threads: params.threads,
+      signal,
     })
 
     const stat = fs.statSync(outputFile)
     const stream = Bun.file(outputFile).stream()
+    await ensureAssetNotPurging(params.assetKey)
     await s3Service.putObject(bucket, key, stream, stat.size, 'video/mp4')
 
     return { ...params.videoSpec, key }
   } catch (err) {
     const { code, message } = getErrorDetails(err)
     const lowerMsg = message.toLowerCase()
+
+    if (
+      signal?.aborted ||
+      code === 'ABORT_ERR' ||
+      message.includes('aborted') ||
+      lowerMsg.includes('abort')
+    ) {
+      throw ApplicationFailure.create({
+        message: 'Video transcoding cancelled',
+        nonRetryable: true,
+        cause: err instanceof Error ? err : undefined,
+      })
+    }
 
     if (
       code === 'ENOENT' ||
@@ -302,6 +354,7 @@ export async function transcodeVideoActivity(
 }
 
 export interface AudioActivityParams {
+  taskId?: string
   assetKey: string
   filePath: string
   threads?: number
@@ -313,6 +366,14 @@ export async function transcodeAudioActivity(
   const bucket = process.env.S3_BUCKET || 'shumai'
   const stem = stemFromKey(params.assetKey)
   const key = path.posix.join(path.posix.dirname(params.assetKey), `${stem}-audio-proxy.mp4`)
+
+  const signal = getActivityCancellationSignal(params.taskId)
+  if (signal?.aborted) {
+    throw ApplicationFailure.create({
+      message: 'Audio transcoding cancelled',
+      nonRetryable: true,
+    })
+  }
 
   try {
     await s3Service.headObject(bucket, key)
@@ -330,16 +391,31 @@ export async function transcodeAudioActivity(
       outputFile,
       bitrate: '128k',
       threads: params.threads,
+      signal,
     })
 
     const stat = fs.statSync(outputFile)
     const stream = Bun.file(outputFile).stream()
+    await ensureAssetNotPurging(params.assetKey)
     await s3Service.putObject(bucket, key, stream, stat.size, 'video/mp4')
 
     return { width: 0, height: 0, key }
   } catch (err) {
     const { code, message } = getErrorDetails(err)
     const lowerMsg = message.toLowerCase()
+
+    if (
+      signal?.aborted ||
+      code === 'ABORT_ERR' ||
+      message.includes('aborted') ||
+      lowerMsg.includes('abort')
+    ) {
+      throw ApplicationFailure.create({
+        message: 'Audio transcoding cancelled',
+        nonRetryable: true,
+        cause: err instanceof Error ? err : undefined,
+      })
+    }
 
     if (
       code === 'ENOENT' ||
@@ -400,6 +476,7 @@ export async function transcodeImageActivity(
       },
     )
     const buffer = fs.readFileSync(outputFile)
+    await ensureAssetNotPurging(params.assetKey)
     await s3Service.putObject(bucket, key, buffer, buffer.length, 'image/webp')
 
     return { ...params.imageSpec, key }
@@ -430,6 +507,7 @@ export async function transcodeImageActivity(
 }
 
 export interface GenerateSpriteActivityParams {
+  taskId?: string
   assetKey: string
   filePath: string
   mediaInfo: PrismaJson.MediaInfo
@@ -439,6 +517,14 @@ export interface GenerateSpriteActivityParams {
 
 export async function generateSpriteActivity(params: GenerateSpriteActivityParams) {
   const bucket = process.env.S3_BUCKET || 'shumai'
+  const signal = getActivityCancellationSignal(params.taskId)
+  if (signal?.aborted) {
+    throw ApplicationFailure.create({
+      message: 'Sprite/Poster generation cancelled',
+      nonRetryable: true,
+    })
+  }
+
   try {
     await s3Service.headObject(bucket, params.spriteSpec.key)
     await s3Service.headObject(bucket, params.posterSpec.key)
@@ -457,6 +543,7 @@ export async function generateSpriteActivity(params: GenerateSpriteActivityParam
         params.filePath,
         spriteFile,
         posterFile,
+        signal,
       )
       if (params.mediaInfo && params.mediaInfo.metadata) {
         params.mediaInfo.metadata.totalFrames = pdfRes.pageCount
@@ -470,10 +557,12 @@ export async function generateSpriteActivity(params: GenerateSpriteActivityParam
         spriteFile,
         posterFile,
         params.mediaInfo.duration,
+        signal,
       )
     }
 
     const spriteBuffer = fs.readFileSync(spriteFile)
+    await ensureAssetNotPurging(params.assetKey)
     await s3Service.putObject(
       bucket,
       params.spriteSpec.key,
@@ -495,6 +584,19 @@ export async function generateSpriteActivity(params: GenerateSpriteActivityParam
   } catch (err) {
     const { code, message } = getErrorDetails(err)
     const lowerMsg = message.toLowerCase()
+
+    if (
+      signal?.aborted ||
+      code === 'ABORT_ERR' ||
+      message.includes('aborted') ||
+      lowerMsg.includes('abort')
+    ) {
+      throw ApplicationFailure.create({
+        message: 'Sprite/Poster generation cancelled',
+        nonRetryable: true,
+        cause: err instanceof Error ? err : undefined,
+      })
+    }
 
     if (
       code === 'ENOENT' ||
@@ -610,6 +712,7 @@ export async function generatePdfProxyActivity(
 
     const stat = fs.statSync(pdfFilePath)
     const stream = Bun.file(pdfFilePath).stream()
+    await ensureAssetNotPurging(params.assetKey)
     await s3Service.putObject(bucket, pdfProxyKey, stream, stat.size, 'application/pdf')
 
     return { pdfProxyKey, pdfFilePath }
@@ -668,9 +771,9 @@ export async function updateAssetMediaActivity(params: UpdateAssetMediaActivityP
     include: { storageKey: true },
   })
   const key = asset?.storageKey?.key
-  if (!asset || !key) {
+  if (!asset || !key || asset.status === AssetStatus.pending_purge) {
     throw ApplicationFailure.create({
-      message: 'Asset not found or has no key',
+      message: 'Asset not found, has no key, or is being purged',
       nonRetryable: true,
     })
   }
@@ -679,14 +782,24 @@ export async function updateAssetMediaActivity(params: UpdateAssetMediaActivityP
   const buffer = Buffer.from(JSON.stringify(params.mediaInfo))
   await s3Service.putObject(bucket, infoKey, buffer, buffer.length, 'application/json')
 
-  await prisma.asset.update({
-    where: { id: params.assetId },
+  const { count } = await prisma.asset.updateMany({
+    where: {
+      id: params.assetId,
+      status: { not: AssetStatus.pending_purge },
+    },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     data: { media: params.mediaInfo as any, hasJpegPreview: false },
   })
+  if (count === 0) {
+    logger.info(
+      { assetId: params.assetId },
+      '[updateAssetMediaActivity] Asset was deleted or pending purge before media update completed',
+    )
+  }
 }
 
 export async function takeScreenshotsActivity(params: {
+  taskId?: string
   assetKey: string
   assetId: string
   start: number
@@ -695,11 +808,33 @@ export async function takeScreenshotsActivity(params: {
   commentTimestamp?: number | null
   annotations?: PrismaJson.AnnotationList | null
 }): Promise<Array<{ key: string; timestamp: number }>> {
+  const signal = getActivityCancellationSignal(params.taskId)
+  if (signal?.aborted) {
+    throw ApplicationFailure.create({
+      message: 'Screenshot extraction cancelled',
+      nonRetryable: true,
+    })
+  }
+
   try {
-    return await transcodeService.takeScreenshots(params)
+    return await transcodeService.takeScreenshots({ ...params, signal })
   } catch (err) {
     const { code, message } = getErrorDetails(err)
     const lowerMsg = message.toLowerCase()
+
+    if (
+      signal?.aborted ||
+      code === 'ABORT_ERR' ||
+      message.includes('aborted') ||
+      lowerMsg.includes('abort')
+    ) {
+      throw ApplicationFailure.create({
+        message: 'Screenshot extraction cancelled',
+        nonRetryable: true,
+        cause: err instanceof Error ? err : undefined,
+      })
+    }
+
     if (
       code === 'ENOENT' ||
       lowerMsg.includes('enoent') ||
@@ -720,11 +855,21 @@ export async function takeScreenshotsActivity(params: {
 export interface ExtractPosterActivityParams {
   assetKey: string
   posterSpec: PrismaJson.PosterInfo
+  taskId?: string
+  signal?: AbortSignal
 }
 
 export async function extractPosterActivity(
   params: ExtractPosterActivityParams,
 ): Promise<{ poster: PrismaJson.PosterInfo }> {
+  const signal = params.signal || getActivityCancellationSignal(params.taskId)
+  if (signal?.aborted) {
+    throw ApplicationFailure.create({
+      message: 'Poster extraction cancelled',
+      nonRetryable: true,
+    })
+  }
+
   const bucket = process.env.S3_BUCKET || 'shumai'
   try {
     await s3Service.headObject(bucket, params.posterSpec.key)
@@ -758,9 +903,10 @@ export async function extractPosterActivity(
       '75',
       posterFile,
     ]
-    await execFileAsync('ffmpeg', ['-y', '-loglevel', 'warning', ...args])
+    await execFileAsync('ffmpeg', ['-y', '-loglevel', 'warning', ...args], { signal })
 
     const posterBuffer = fs.readFileSync(posterFile)
+    await ensureAssetNotPurging(params.assetKey)
     await s3Service.putObject(
       bucket,
       params.posterSpec.key,
@@ -773,6 +919,20 @@ export async function extractPosterActivity(
   } catch (err) {
     const { code, message } = getErrorDetails(err)
     const lowerMsg = message.toLowerCase()
+
+    if (
+      signal?.aborted ||
+      code === 'ABORT_ERR' ||
+      message.includes('aborted') ||
+      lowerMsg.includes('abort')
+    ) {
+      throw ApplicationFailure.create({
+        message: 'Poster extraction cancelled',
+        nonRetryable: true,
+        cause: err instanceof Error ? err : undefined,
+      })
+    }
+
     if (
       code === 'ENOENT' ||
       lowerMsg.includes('enoent') ||
@@ -820,6 +980,7 @@ export async function overlayAnnotationsActivity(params: {
 }
 
 export async function renderPdfPagesActivity(params: {
+  taskId?: string
   assetKey: string
   assetId: string
   start: number
@@ -827,11 +988,33 @@ export async function renderPdfPagesActivity(params: {
   commentTimestamp?: number | null
   annotations?: PrismaJson.AnnotationList | null
 }): Promise<Array<{ key: string; page: number }>> {
+  const signal = getActivityCancellationSignal(params.taskId)
+  if (signal?.aborted) {
+    throw ApplicationFailure.create({
+      message: 'PDF page rendering cancelled',
+      nonRetryable: true,
+    })
+  }
+
   try {
-    return await transcodeService.renderPdfPages(params)
+    return await transcodeService.renderPdfPages({ ...params, signal })
   } catch (err) {
     const { code, message } = getErrorDetails(err)
     const lowerMsg = message.toLowerCase()
+
+    if (
+      signal?.aborted ||
+      code === 'ABORT_ERR' ||
+      message.includes('aborted') ||
+      lowerMsg.includes('abort')
+    ) {
+      throw ApplicationFailure.create({
+        message: 'PDF page rendering cancelled',
+        nonRetryable: true,
+        cause: err instanceof Error ? err : undefined,
+      })
+    }
+
     if (
       code === 'ENOENT' ||
       lowerMsg.includes('enoent') ||
@@ -937,7 +1120,7 @@ export async function createAutofillTaskIfEnabledActivity(
       project: true,
     },
   })
-  if (!asset || (asset.type !== 'file' && asset.type !== 'version_stack') || asset.isDeleted) {
+  if (!asset || (asset.type !== 'file' && asset.type !== 'version_stack')) {
     return
   }
 

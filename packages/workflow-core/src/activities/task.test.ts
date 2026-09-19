@@ -48,6 +48,27 @@ describe('Task Activities', () => {
     expect(updated?.status).toBe(AssetStatus.processing)
   })
 
+  it('should NOT overwrite trashed status when asset is soft-deleted (isDeleted: true)', async () => {
+    const asset = await prisma.asset.create({
+      data: {
+        name: 'trashed-video.mp4',
+        storageKey: { create: { key: 'trashed-video.mp4' } },
+        status: AssetStatus.trashed,
+        isDeleted: true,
+        type: 'file',
+      },
+    })
+
+    await updateAssetStatusActivity({
+      assetId: asset.id,
+      status: AssetStatus.processed,
+    })
+
+    const updated = await prisma.asset.findUnique({ where: { id: asset.id } })
+    expect(updated?.status).toBe(AssetStatus.trashed)
+    expect(updated?.isDeleted).toBe(true)
+  })
+
   it('should update task usage', async () => {
     const task = await prisma.workflowTask.create({
       data: {
@@ -68,5 +89,14 @@ describe('Task Activities', () => {
     expect(updated?.inputTokens).toBe(100)
     expect(updated?.outputTokens).toBe(200)
     expect(updated?.model).toBe('gpt-4o')
+  })
+
+  it('should not throw error when updating status of a non-existent or purged task', async () => {
+    await expect(
+      updateTaskStatusActivity({
+        taskId: 'non-existent-task-id',
+        status: WorkflowTaskStatus.failed,
+      }),
+    ).resolves.not.toThrow()
   })
 })

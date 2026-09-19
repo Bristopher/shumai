@@ -204,12 +204,63 @@ export function getConcurrencyLimit(envVar: string | undefined, defaultValue: nu
   return parsed
 }
 
+export interface LocalTaskContext {
+  taskId: string
+  abortController: AbortController
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const globalObjWithCancel = globalThis as any
 if (!globalObjWithCancel.__localCancelHandlers) {
   globalObjWithCancel.__localCancelHandlers = new Map<string, () => void>()
 }
 const localCancelHandlers: Map<string, () => void> = globalObjWithCancel.__localCancelHandlers
+
+if (!globalObjWithCancel.__localTaskAbortControllers) {
+  globalObjWithCancel.__localTaskAbortControllers = new Map<string, AbortController>()
+}
+const localTaskAbortControllers: Map<string, AbortController> =
+  globalObjWithCancel.__localTaskAbortControllers
+
+interface LocalTaskStorageHolder {
+  getStore: () => LocalTaskContext | undefined
+  run: <T>(store: LocalTaskContext, fn: () => T) => T
+}
+
+function getLocalTaskStorage(): LocalTaskStorageHolder | undefined {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (globalThis as any).__localTaskStorage
+}
+
+export function registerLocalTaskAbortController(
+  taskId: string,
+  controller: AbortController,
+): void {
+  localTaskAbortControllers.set(taskId, controller)
+}
+
+export function unregisterLocalTaskAbortController(taskId: string): void {
+  localTaskAbortControllers.delete(taskId)
+}
+
+export function runInLocalTaskContext<T>(context: LocalTaskContext, fn: () => T): T {
+  registerLocalTaskAbortController(context.taskId, context.abortController)
+  const storage = getLocalTaskStorage()
+  if (storage) {
+    return storage.run(context, fn)
+  }
+  return fn()
+}
+
+export function getLocalTaskAbortSignal(taskId?: string): AbortSignal | undefined {
+  if (taskId) {
+    const controller = localTaskAbortControllers.get(taskId)
+    if (controller) {
+      return controller.signal
+    }
+  }
+  return getLocalTaskStorage()?.getStore()?.abortController?.signal
+}
 
 export function registerLocalCancelHandler(taskId: string, cancelFn: () => void) {
   localCancelHandlers.set(taskId, cancelFn)
@@ -220,10 +271,17 @@ export function unregisterLocalCancelHandler(taskId: string) {
 }
 
 export function triggerLocalCancel(taskId: string): boolean {
+  let cancelled = false
+  const controller = localTaskAbortControllers.get(taskId)
+  if (controller) {
+    controller.abort()
+    localTaskAbortControllers.delete(taskId)
+    cancelled = true
+  }
   const handler = localCancelHandlers.get(taskId)
   if (handler) {
     handler()
-    return true
+    cancelled = true
   }
-  return false
+  return cancelled
 }

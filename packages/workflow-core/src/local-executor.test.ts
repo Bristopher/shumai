@@ -413,5 +413,153 @@ describe('LocalExecutor Integration Tests', () => {
 
       unregisterLocalCancelHandler(taskId)
     })
+
+    it('clears active heartbeat timer when cancelling a task', async () => {
+      let resolveChat: (value: unknown) => void = () => {}
+      const chatPromise = new Promise((resolve) => {
+        resolveChat = resolve
+      })
+      mocks.agentChat.mockImplementationOnce(() => chatPromise)
+
+      const task = await prisma.workflowTask.create({
+        data: {
+          assetId: 'test-asset-cancel',
+          type: WorkflowTaskType.chat,
+          status: WorkflowTaskStatus.pending,
+        },
+      })
+
+      // Wait briefly for submit to start and establish heartbeat
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      // Heartbeat timer should be tracked
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const heartbeats = (executor as any).heartbeatIntervals as Map<string, Timer>
+      expect(heartbeats.has(task.id)).toBe(true)
+
+      await executor.cancel(task.id)
+
+      // Timer should be cleared and removed
+      expect(heartbeats.has(task.id)).toBe(false)
+
+      resolveChat(undefined)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+
+    it('handles heartbeat updateMany returning 0 when task is deleted from database', async () => {
+      let resolveChat: (value: unknown) => void = () => {}
+      const chatPromise = new Promise((resolve) => {
+        resolveChat = resolve
+      })
+      mocks.agentChat.mockImplementationOnce(() => chatPromise)
+
+      const task = await prisma.workflowTask.create({
+        data: {
+          assetId: 'test-asset-deleted',
+          type: WorkflowTaskType.chat,
+          status: WorkflowTaskStatus.pending,
+        },
+      })
+
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      // Delete the task from DB while task is running
+      await prisma.workflowTask.delete({ where: { id: task.id } })
+
+      // UpdateMany should safely return count 0 without throwing P2025
+      const { count } = await prisma.workflowTask.updateMany({
+        where: { id: task.id },
+        data: { heartbeat: new Date() },
+      })
+      expect(count).toBe(0)
+
+      resolveChat(undefined)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+
+    it('aborts local task abort signal when task is cancelled', async () => {
+      const { getLocalTaskAbortSignal } = await import('./workflow-utils')
+      let resolveChat: (value: unknown) => void = () => {}
+      const chatPromise = new Promise((resolve) => {
+        resolveChat = resolve
+      })
+      mocks.agentChat.mockImplementationOnce(() => chatPromise)
+
+      const task = await prisma.workflowTask.create({
+        data: {
+          assetId: 'test-asset-abort-signal',
+          type: WorkflowTaskType.chat,
+          status: WorkflowTaskStatus.pending,
+        },
+      })
+
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      const signal = getLocalTaskAbortSignal(task.id)
+      expect(signal).toBeDefined()
+      expect(signal?.aborted).toBe(false)
+
+      await executor.cancel(task.id)
+
+      expect(signal?.aborted).toBe(true)
+
+      resolveChat(undefined)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+
+    it('cancels queued local tasks before execution when limiter is saturated', async () => {
+      let resolveFirstTranscode: (value: unknown) => void = () => {}
+      const firstTranscodePromise = new Promise((resolve) => {
+        resolveFirstTranscode = resolve
+      })
+      mocks.transcodeMedia.mockImplementationOnce(() => firstTranscodePromise)
+      mocks.transcodeMedia.mockImplementationOnce(() => Promise.resolve())
+
+      // 1. Task 1 starts and occupies the single transcode slot
+      const task1 = await prisma.workflowTask.create({
+        data: {
+          assetId: 'asset-queued-cancel-1',
+          type: WorkflowTaskType.transcode,
+          status: WorkflowTaskStatus.pending,
+        },
+      })
+
+      // 2. Task 2 is submitted and queued because concurrency limit is 1
+      const task2 = await prisma.workflowTask.create({
+        data: {
+          assetId: 'asset-queued-cancel-2',
+          type: WorkflowTaskType.transcode,
+          status: WorkflowTaskStatus.pending,
+        },
+      })
+
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      // Task 1 should be running
+      expect(mocks.transcodeMedia).toHaveBeenCalledWith(expect.objectContaining({ id: task1.id }))
+      // Task 2 should not have started yet
+      expect(mocks.transcodeMedia).not.toHaveBeenCalledWith(
+        expect.objectContaining({ id: task2.id }),
+      )
+
+      // 3. Cancel task 2 while it is still waiting in the queue
+      await executor.cancel(task2.id)
+
+      // 4. Release task 1 so the concurrency slot becomes available
+      resolveFirstTranscode(undefined)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      // 5. Verify task 2's workflow was NEVER executed
+      expect(mocks.transcodeMedia).not.toHaveBeenCalledWith(
+        expect.objectContaining({ id: task2.id }),
+      )
+
+      // 6. Verify task 2 was marked failed / cancelled
+      const dbTask2 = await prisma.workflowTask.findUnique({
+        where: { id: task2.id },
+      })
+      expect(dbTask2?.status).toBe(WorkflowTaskStatus.failed)
+      expect((dbTask2?.output as { error?: string })?.error).toContain('cancelled')
+    })
   })
 })

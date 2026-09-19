@@ -595,6 +595,83 @@ describe('Transcode Activities', () => {
     expect(updated?.hasJpegPreview).toBe(false)
     expect(s3Service.putObject).toHaveBeenCalled()
   })
+
+  it('should throw non-retryable ApplicationFailure and not upload when asset is pending_purge in updateAssetMediaActivity', async () => {
+    const asset = await prisma.asset.create({
+      data: {
+        name: 'purging.mp4',
+        storageKey: { create: { key: 'purging.mp4' } },
+        status: 'pending_purge',
+        type: 'file',
+      },
+    })
+
+    const putObjectSpy = vi.mocked(s3Service.putObject)
+    putObjectSpy.mockClear()
+
+    await expect(
+      updateAssetMediaActivity({
+        assetId: asset.id,
+        mediaInfo: { duration: 100 } as unknown as PrismaJson.MediaInfo,
+      }),
+    ).rejects.toThrow('Asset not found, has no key, or is being purged')
+
+    expect(putObjectSpy).not.toHaveBeenCalled()
+  })
+
+  it('should tolerate missing or deleted asset without throwing P2025 in updateAssetMediaActivity', async () => {
+    const asset = await prisma.asset.create({
+      data: {
+        name: 'deleted-during-update.mp4',
+        storageKey: { create: { key: 'deleted-during-update.mp4' } },
+        status: 'uploaded',
+        type: 'file',
+      },
+    })
+
+    const putObjectSpy = vi.mocked(s3Service.putObject)
+    putObjectSpy.mockClear()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    putObjectSpy.mockImplementationOnce(async (): Promise<any> => {
+      await prisma.asset.delete({ where: { id: asset.id } })
+      return {}
+    })
+
+    await expect(
+      updateAssetMediaActivity({
+        assetId: asset.id,
+        mediaInfo: { duration: 100 } as unknown as PrismaJson.MediaInfo,
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('should throw non-retryable ApplicationFailure and not upload when asset is pending_purge in transcodeVideoActivity', async () => {
+    await prisma.asset.create({
+      data: {
+        name: 'purging-video.mp4',
+        storageKey: { create: { key: 'purging-video.mp4' } },
+        status: 'pending_purge',
+        type: 'file',
+      },
+    })
+
+    vi.mocked(s3Service.headObject).mockRejectedValue(new Error('Not found'))
+    const putObjectSpy = vi.mocked(s3Service.putObject)
+    putObjectSpy.mockClear()
+
+    await expect(
+      transcodeVideoActivity({
+        assetKey: 'purging-video.mp4',
+        filePath: '/tmp/purging-video.mp4',
+        videoSpec: { resolution: '720p', width: 1280, height: 720 },
+        duration: 10,
+        originalFps: 30,
+      }),
+    ).rejects.toThrow('Asset or storage key has been purged or is pending purge')
+
+    expect(putObjectSpy).not.toHaveBeenCalled()
+  })
+
   it('should call transcodeService.transcodeVideo', async () => {
     vi.mocked(s3Service.headObject).mockRejectedValue(new Error('Not found'))
 
@@ -731,6 +808,26 @@ describe('Transcode Activities', () => {
           originalFps: 30,
         }),
       ).rejects.toThrowError(/Video transcoding failed/)
+    })
+
+    it('should throw non-retryable ApplicationFailure when transcodeVideoActivity is cancelled', async () => {
+      vi.mocked(s3Service.headObject).mockRejectedValue(new Error('Not found'))
+      const abortError = new Error('The operation was aborted')
+      abortError.name = 'AbortError'
+      vi.mocked(transcodeService.transcodeVideo).mockRejectedValue(abortError)
+
+      const promise = transcodeVideoActivity({
+        assetKey: 'v.mp4',
+        filePath: '/tmp/v.mp4',
+        videoSpec: { resolution: '720p', width: 1280, height: 720 },
+        duration: 10,
+        originalFps: 30,
+      })
+
+      await expect(promise).rejects.toThrowError(/Video transcoding cancelled/)
+      await expect(promise).rejects.toMatchObject({
+        nonRetryable: true,
+      })
     })
 
     it('should throw non-retryable ApplicationFailure when transcodeImageActivity fails with sharp error', async () => {
@@ -960,16 +1057,15 @@ describe('Transcode Activities', () => {
       vi.mocked(s3Service.resolveInput).mockResolvedValue('https://mock-r2.com/video.mp4')
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(child_process.execFile as any).mockImplementation(
-        (
-          file: string,
-          args: string[],
-          cb: (err: Error | null, result: { stdout: string; stderr: string }) => void,
-        ) => {
+        (file: string, args: string[], optionsOrCb: unknown, maybeCb?: unknown) => {
+          const cb = typeof optionsOrCb === 'function' ? optionsOrCb : maybeCb
           if (file === 'ffmpeg') {
             const outPath = args[args.length - 1]
             fs.writeFileSync(outPath, 'fake-poster-bytes')
           }
-          cb(null, { stdout: '', stderr: '' })
+          if (typeof cb === 'function') {
+            cb(null, { stdout: '', stderr: '' })
+          }
         },
       )
 
@@ -992,6 +1088,7 @@ describe('Transcode Activities', () => {
           '-c:v',
           'libwebp',
         ]),
+        expect.objectContaining({ signal: undefined }),
         expect.any(Function),
       )
       expect(s3Service.putObject).toHaveBeenCalledWith(
@@ -1001,6 +1098,96 @@ describe('Transcode Activities', () => {
         expect.any(Number),
         'image/webp',
       )
+    })
+
+    it('should throw non-retryable ApplicationFailure when poster extraction is cancelled with aborted signal', async () => {
+      vi.mocked(s3Service.headObject).mockRejectedValue(new Error('Not found'))
+      const controller = new AbortController()
+      controller.abort()
+
+      await expect(
+        extractPosterActivity({
+          assetKey: 'video.mp4',
+          posterSpec: { key: 'files/asset-1/poster.webp' },
+          signal: controller.signal,
+        }),
+      ).rejects.toMatchObject({
+        message: 'Poster extraction cancelled',
+        nonRetryable: true,
+      })
+    })
+
+    it('should throw non-retryable ApplicationFailure when poster extraction ffmpeg execution is aborted', async () => {
+      vi.mocked(s3Service.headObject).mockRejectedValue(new Error('Not found'))
+      vi.mocked(s3Service.resolveInput).mockResolvedValue('https://mock-r2.com/video.mp4')
+      const controller = new AbortController()
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(child_process.execFile as any).mockImplementation(
+        (_file: string, _args: string[], optionsOrCb: unknown, maybeCb?: unknown) => {
+          const cb = typeof optionsOrCb === 'function' ? optionsOrCb : maybeCb
+          controller.abort()
+          const abortErr = new Error('The operation was aborted')
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ;(abortErr as any).code = 'ABORT_ERR'
+          if (typeof cb === 'function') {
+            cb(abortErr, { stdout: '', stderr: '' })
+          }
+        },
+      )
+
+      await expect(
+        extractPosterActivity({
+          assetKey: 'video.mp4',
+          posterSpec: { key: 'files/asset-1/poster.webp' },
+          signal: controller.signal,
+        }),
+      ).rejects.toMatchObject({
+        message: 'Poster extraction cancelled',
+        nonRetryable: true,
+      })
+    })
+
+    it('should throw non-retryable ApplicationFailure and not upload when asset is pending_purge before poster upload', async () => {
+      vi.mocked(s3Service.headObject).mockRejectedValue(new Error('Not found'))
+      vi.mocked(s3Service.resolveInput).mockResolvedValue('https://mock-r2.com/video.mp4')
+      const putObjectSpy = vi.mocked(s3Service.putObject)
+      putObjectSpy.mockClear()
+
+      await prisma.asset.create({
+        data: {
+          name: 'purging-poster.mp4',
+          storageKey: { create: { key: 'purging-poster.mp4' } },
+          status: 'pending_purge',
+          type: 'file',
+        },
+      })
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(child_process.execFile as any).mockImplementation(
+        (file: string, args: string[], optionsOrCb: unknown, maybeCb?: unknown) => {
+          const cb = typeof optionsOrCb === 'function' ? optionsOrCb : maybeCb
+          if (file === 'ffmpeg') {
+            const outPath = args[args.length - 1]
+            fs.writeFileSync(outPath, 'fake-poster-bytes')
+          }
+          if (typeof cb === 'function') {
+            cb(null, { stdout: '', stderr: '' })
+          }
+        },
+      )
+
+      await expect(
+        extractPosterActivity({
+          assetKey: 'purging-poster.mp4',
+          posterSpec: { key: 'files/asset-1/poster.webp' },
+        }),
+      ).rejects.toMatchObject({
+        message: 'Asset or storage key has been purged or is pending purge',
+        nonRetryable: true,
+      })
+
+      expect(putObjectSpy).not.toHaveBeenCalled()
     })
 
     it('should delete S3 object successfully', async () => {
@@ -1250,6 +1437,57 @@ describe('Transcode Activities', () => {
         where: { assetId: folderAsset.id, type: 'ai_metadata_autofill' },
       })
       expect(task).toBeNull()
+    })
+
+    it('should create ai_metadata_autofill task when asset is in trash (isDeleted: true)', async () => {
+      const user = await prisma.user.create({
+        data: { name: 'Test User Trashed Autofill', email: 'test-trashed-autofill@test.com' },
+      })
+      const team = await prisma.team.create({
+        data: { name: 'Test Team Trashed Autofill' },
+      })
+      await prisma.teamMember.create({
+        data: { teamId: team.id, userId: user.id, role: 'owner' },
+      })
+      const project = await prisma.project.create({
+        data: { name: 'Test Project Trashed Autofill', teamId: team.id },
+      })
+      const autofillAgent = await prisma.agent.create({
+        data: {
+          id: user.id,
+          type: 'autofill',
+          enabled: true,
+          teamId: team.id,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          config: { provider: 'test', model: 'test' } as any,
+        },
+      })
+      const asset = await prisma.asset.create({
+        data: {
+          name: 'trashed-video.mp4',
+          mediaType: 'video/mp4',
+          type: 'file',
+          status: 'trashed',
+          isDeleted: true,
+          projectId: project.id,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          media: { proxyType: 'video' } as any,
+        },
+      })
+
+      await createAutofillTaskIfEnabledActivity({
+        assetId: asset.id,
+        teamId: team.id,
+        projectId: project.id,
+      })
+
+      const task = await prisma.workflowTask.findFirst({
+        where: { assetId: asset.id, type: 'ai_metadata_autofill' },
+      })
+      expect(task).toBeDefined()
+      expect(task?.status).toBe('pending')
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((task?.payload as any)?.agent?.agentId).toBe(autofillAgent.id)
     })
   })
 })
