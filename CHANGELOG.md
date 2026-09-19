@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+### Fixed
+
+### Changed
+
+## [0.4.7] - 2026-09-19
+
+### Added
+
 - **changelog**: Introduce Keep a Changelog support, historical release summaries, and automated release notes extraction
 - **release**: Automatically populate GitHub release bodies from CHANGELOG.md and promote unreleased notes during version bumps
 - **settings**: Add FFmpeg threads slider to team media processing settings
