@@ -21,7 +21,6 @@ import {
   TooltipTrigger,
 } from '@/ui/components/ui/tooltip'
 import { ProgressCircle } from '@/ui/components/ui/progress-circle'
-import { Skeleton } from '@/ui/components/ui/skeleton'
 import { formatTimeAgo, getTrashDaysLeft } from '@/ui/lib/time'
 import { selectFileNameWithoutExtension } from '@/ui/lib/rename-utils'
 import { cn } from '@/ui/lib/utils'
@@ -261,6 +260,49 @@ export function FileCard({
         ? m.n_days_left_singular({ count: daysLeft })
         : m.n_days_left_plural({ count: daysLeft })
 
+  // A preview (poster thumbnail and/or sprite) can be available before transcoding finishes,
+  // since the poster/sprite are generated and persisted ahead of the proxy transcodes.
+  const hasPreview = Boolean(displayItem.preview?.thumbnailUrl || displayItem.preview?.spriteUrl)
+  const isProcessing = displayItem.status === 'processing' || displayItem.status === 'uploaded'
+
+  // While uploading/transcoding, the creator row is replaced by a short status label so the real
+  // date/author only appears once the asset is ready.
+  const statusText =
+    displayItem.status === 'uploading'
+      ? m.uploading()
+      : displayItem.status === 'uploaded' || displayItem.status === 'processing'
+        ? m.preparing()
+        : null
+
+  const previewBadges =
+    daysLeft !== null ||
+    (typeof displayItem.commentsCount === 'number' && displayItem.commentsCount > 0) ? (
+      <div
+        data-testid="file-card-preview-badges"
+        className="pointer-events-none absolute bottom-1 left-1 z-10 flex items-center gap-1"
+      >
+        {daysLeft !== null && (
+          <span
+            data-testid="file-card-days-left"
+            title={daysLeftTooltip}
+            className="flex items-center gap-1 rounded bg-black/60 px-1 py-0.5 text-xs font-medium tabular-nums text-white"
+          >
+            <Clock className="h-3.5 w-3.5" />
+            <span>{m.days_left_short({ count: daysLeft })}</span>
+          </span>
+        )}
+        {typeof displayItem.commentsCount === 'number' && displayItem.commentsCount > 0 && (
+          <span
+            data-testid="file-card-comments-count"
+            className="flex items-center gap-1 rounded bg-black/60 px-1 py-0.5 text-xs font-medium tabular-nums text-white"
+          >
+            <MessageCircleMore className="h-3.5 w-3.5" />
+            <span>{displayItem.commentsCount}</span>
+          </span>
+        )}
+      </div>
+    ) : null
+
   return (
     <div
       ref={setNodeRef}
@@ -312,63 +354,48 @@ export function FileCard({
       </div>
 
       <div className="relative aspect-square overflow-hidden bg-muted/30">
-        {displayItem.status === 'uploading' ||
-        displayItem.status === 'processing' ||
-        displayItem.status === 'uploaded' ||
-        displayItem.status === 'error' ? (
+        {displayItem.status === 'uploading' ? (
           <div className="flex h-full w-full items-center justify-center bg-background/50">
-            {displayItem.status !== 'error' && (
-              <Skeleton className="absolute inset-0 h-full w-full" />
-            )}
-            {displayItem.status === 'uploading' ? (
-              <ProgressCircle progress={uploadPercent} className="w-16 h-16 z-10" />
-            ) : (
-              <span
-                className={cn(
-                  'z-10 font-medium px-2 text-center text-sm',
-                  displayItem.status === 'error'
-                    ? 'text-destructive font-semibold'
-                    : 'text-muted-foreground capitalize',
-                )}
-              >
-                {displayItem.status === 'uploaded'
-                  ? 'Processing'
-                  : displayItem.status === 'error'
-                    ? 'Failed to upload'
-                    : displayItem.status}
-              </span>
-            )}
+            <ProgressCircle progress={uploadPercent} className="w-16 h-16 z-10" />
+          </div>
+        ) : hasPreview ? (
+          <>
+            <div
+              data-testid="file-card-preview-media"
+              className={cn('h-full w-full', isProcessing && 'animate-pulse')}
+            >
+              <FilePreview item={displayItem} showDuration={!isProcessing} />
+            </div>
+            {previewBadges}
+          </>
+        ) : displayItem.status === 'error' ? (
+          <div className="flex h-full w-full items-center justify-center bg-background/50">
+            <span className="z-10 font-medium px-2 text-center text-sm text-destructive font-semibold">
+              {m.failed_to_upload()}
+            </span>
+          </div>
+        ) : displayItem.status === 'processing' || displayItem.status === 'uploaded' ? (
+          <div className="flex h-full w-full items-center justify-center">
+            {/* Same geometry as the upload progress ring, but empty inside and no percentage. */}
+            <svg
+              viewBox="0 0 50 50"
+              data-testid="file-card-preparing-circle"
+              className="h-16 w-16 opacity-60 animate-preparing-breathe"
+            >
+              <circle
+                cx="25"
+                cy="25"
+                r="20"
+                className="stroke-muted-foreground"
+                strokeWidth="4"
+                fill="transparent"
+              />
+            </svg>
           </div>
         ) : (
           <>
             <FilePreview item={displayItem} showDuration />
-            {(daysLeft !== null ||
-              (typeof displayItem.commentsCount === 'number' && displayItem.commentsCount > 0)) && (
-              <div
-                data-testid="file-card-preview-badges"
-                className="pointer-events-none absolute bottom-1 left-1 z-10 flex items-center gap-1"
-              >
-                {daysLeft !== null && (
-                  <span
-                    data-testid="file-card-days-left"
-                    title={daysLeftTooltip}
-                    className="flex items-center gap-1 rounded bg-black/60 px-1 py-0.5 text-xs font-medium tabular-nums text-white"
-                  >
-                    <Clock className="h-3.5 w-3.5" />
-                    <span>{m.days_left_short({ count: daysLeft })}</span>
-                  </span>
-                )}
-                {typeof displayItem.commentsCount === 'number' && displayItem.commentsCount > 0 && (
-                  <span
-                    data-testid="file-card-comments-count"
-                    className="flex items-center gap-1 rounded bg-black/60 px-1 py-0.5 text-xs font-medium tabular-nums text-white"
-                  >
-                    <MessageCircleMore className="h-3.5 w-3.5" />
-                    <span>{displayItem.commentsCount}</span>
-                  </span>
-                )}
-              </div>
-            )}
+            {previewBadges}
           </>
         )}
       </div>
@@ -405,7 +432,7 @@ export function FileCard({
             >
               <TooltipTrigger asChild>
                 <p ref={creatorRef} className="text-sm text-muted-foreground line-clamp-2 h-[2lh]">
-                  {creatorText}
+                  {statusText ?? creatorText}
                 </p>
               </TooltipTrigger>
               {isCreatorTooltipOpen && (
