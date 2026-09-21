@@ -41,6 +41,15 @@ describe('transcodeImageWorkflow', () => {
     createAutofillTaskIfEnabledActivity: Object.assign(vi.fn(), {
       _activityName: 'createAutofillTaskIfEnabledActivity',
     }),
+    resolveXmpSourceActivity: Object.assign(vi.fn(), {
+      _activityName: 'resolveXmpSourceActivity',
+    }),
+    renderXmpPreviewActivity: Object.assign(vi.fn(), {
+      _activityName: 'renderXmpPreviewActivity',
+    }),
+    requeueXmpSiblingsActivity: Object.assign(vi.fn(), {
+      _activityName: 'requeueXmpSiblingsActivity',
+    }),
   }
 
   beforeEach(() => {
@@ -154,5 +163,95 @@ describe('transcodeImageWorkflow', () => {
       teamId: 'team-1',
       projectId: 'proj-1',
     })
+
+    // A processed photo re-queues any XMP sidecar of it that finished first without media.
+    expect(mockActivities.requeueXmpSiblingsActivity).toHaveBeenCalledWith({
+      assetId: 'asset-image',
+    })
+    expect(mockActivities.resolveXmpSourceActivity).not.toHaveBeenCalled()
+  })
+
+  const xmpTask = (): WorkflowTask =>
+    ({
+      id: 'task-xmp',
+      assetId: 'asset-xmp',
+      type: WorkflowTaskType.transcode_image,
+      status: WorkflowTaskStatus.pending,
+      payload: { projectId: 'proj-1', transcode: { thumbnail: true } },
+      teamId: 'team-1',
+      projectId: 'proj-1',
+    }) as unknown as WorkflowTask
+
+  it('should preview an XMP sidecar from its photo, rendered with its edits', async () => {
+    mockActivities.getAssetActivity.mockResolvedValue({
+      id: 'asset-xmp',
+      name: 'DSCF5543.RAF.xmp',
+      storageKey: { key: 'files/x/DSCF5543.RAF.xmp' },
+      mediaType: 'application/rdf+xml',
+    })
+    mockActivities.downloadMediaToTmpActivity
+      .mockResolvedValueOnce({ filePath: '/tmp/a/DSCF5543.RAF.xmp', tmpDir: '/tmp/a' })
+      .mockResolvedValueOnce({ filePath: '/tmp/b/DSCF5543.RAF', tmpDir: '/tmp/b' })
+    mockActivities.resolveXmpSourceActivity.mockResolvedValue({
+      key: 'files/y/DSCF5543.RAF',
+      name: 'DSCF5543.RAF',
+    })
+    mockActivities.renderXmpPreviewActivity.mockResolvedValue({
+      path: '/tmp/a/xmp-render-1.jpg',
+      outcome: 'applied',
+      editor: 'darktable',
+    })
+    mockActivities.getMediaInfoActivity.mockResolvedValue({
+      proxyType: 'image',
+      metadata: { originalWidth: 2560, originalHeight: 3840 },
+      videoTranscodes: [],
+      imageTranscodes: [],
+    })
+    mockActivities.transcodeImageActivity.mockResolvedValue({ key: 'x.webp', format: 'webp' })
+
+    await transcodeImageWorkflow(xmpTask())
+
+    expect(mockActivities.downloadMediaToTmpActivity).toHaveBeenNthCalledWith(2, {
+      assetKey: 'files/y/DSCF5543.RAF',
+    })
+    expect(mockActivities.renderXmpPreviewActivity).toHaveBeenCalledWith({
+      xmpPath: '/tmp/a/DSCF5543.RAF.xmp',
+      photoPath: '/tmp/b/DSCF5543.RAF',
+    })
+    // Everything downstream works on the rendered image, but outputs sit beside the sidecar.
+    expect(mockActivities.getMediaInfoActivity).toHaveBeenCalledWith(
+      expect.objectContaining({ filePath: '/tmp/a/xmp-render-1.jpg', assetId: 'asset-xmp' }),
+    )
+    expect(mockActivities.transcodeImageActivity).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assetKey: 'files/x/DSCF5543.RAF.xmp',
+        filePath: '/tmp/a/xmp-render-1.jpg',
+      }),
+    )
+    expect(mockActivities.requeueXmpSiblingsActivity).not.toHaveBeenCalled()
+    expect(mockActivities.cleanupTmpDirActivity).toHaveBeenCalledWith({ tmpDir: '/tmp/a' })
+    expect(mockActivities.cleanupTmpDirActivity).toHaveBeenCalledWith({ tmpDir: '/tmp/b' })
+  })
+
+  it('should finish an XMP sidecar without media while its photo is not there yet', async () => {
+    mockActivities.getAssetActivity.mockResolvedValue({
+      id: 'asset-xmp',
+      name: 'DSCF5543.RAF.xmp',
+      storageKey: { key: 'files/x/DSCF5543.RAF.xmp' },
+      mediaType: 'application/rdf+xml',
+    })
+    mockActivities.resolveXmpSourceActivity.mockResolvedValue(null)
+
+    await transcodeImageWorkflow(xmpTask())
+
+    expect(mockActivities.updateAssetStatusActivity).toHaveBeenCalledWith({
+      assetId: 'asset-xmp',
+      status: AssetStatus.processed,
+    })
+    expect(mockActivities.updateTaskStatusActivity).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: 'task-xmp', status: WorkflowTaskStatus.completed }),
+    )
+    expect(mockActivities.renderXmpPreviewActivity).not.toHaveBeenCalled()
+    expect(mockActivities.updateAssetMediaActivity).not.toHaveBeenCalled()
   })
 })
