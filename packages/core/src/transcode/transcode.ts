@@ -498,9 +498,11 @@ export class TranscodeService {
     }
 
     const metadata = await sharp(input, { limitInputPixels: false }).metadata()
+    // Cameras store portraits sideways plus an EXIF orientation; report the size as displayed.
+    const shown = metadata.autoOrient ?? metadata
     return {
-      originalWidth: metadata.width || 0,
-      originalHeight: metadata.height || 0,
+      originalWidth: shown.width || 0,
+      originalHeight: shown.height || 0,
       duration: 0,
       bitRate: 0,
       frameRate: 0,
@@ -678,11 +680,14 @@ export class TranscodeService {
     let targetW = width > 0 ? Math.min(width, WEBP_MAX_DIMENSION) : WEBP_MAX_DIMENSION
     let targetH = height && height > 0 ? Math.min(height, WEBP_MAX_DIMENSION) : WEBP_MAX_DIMENSION
 
-    const sharpInstance = sharp(input, { limitInputPixels: false })
+    // autoOrient applies the EXIF orientation, so camera portraits are not transcoded sideways
+    // (webp output drops the tag that would otherwise have turned them upright).
+    const sharpInstance = sharp(input, { limitInputPixels: false, autoOrient: true })
 
     if (isPreview) {
       try {
-        const meta = await sharpInstance.metadata()
+        const stored = await sharpInstance.metadata()
+        const meta = stored.autoOrient ?? stored
         if (meta.width && meta.height) {
           // Fallback shim: If legacy 480 caller passed width=480, map targetShort to 300
           const targetShort = width === 480 ? 300 : width
@@ -1438,12 +1443,14 @@ export class TranscodeService {
       return imageBuffer
     }
 
-    const meta = await sharp(imageBuffer, { limitInputPixels: false }).metadata()
+    // Annotations are drawn in the displayed (EXIF-oriented) coordinate space.
+    const rawMeta = await sharp(imageBuffer, { limitInputPixels: false }).metadata()
+    const meta = rawMeta.autoOrient ?? rawMeta
     const width = meta.width || 1920
     const height = meta.height || 1080
 
     const svgStr = renderAnnotationsToSvg(width, height, annotations)
-    return await sharp(imageBuffer, { limitInputPixels: false })
+    return await sharp(imageBuffer, { limitInputPixels: false, autoOrient: true })
       .composite([{ input: Buffer.from(svgStr), top: 0, left: 0 }])
       .toColorspace('srgb')
       .resize(16383, 16383, { fit: 'inside', withoutEnlargement: true })
@@ -1530,7 +1537,7 @@ export class TranscodeService {
     width: number,
     height: number,
   ): Promise<void> {
-    await sharp(inputPath, { limitInputPixels: false })
+    await sharp(inputPath, { limitInputPixels: false, autoOrient: true })
       .toColorspace('srgb')
       .resize(width, height, { fit: 'inside' })
       .composite([{ input: overlayPngBuffer }])
