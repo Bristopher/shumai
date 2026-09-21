@@ -70,7 +70,17 @@ export function classifyXmp(text: string): XmpClassification {
     const end = /darktable:history_end\s*=\s*"(\d+)"/.exec(text)
     const endTag = /<darktable:history_end>(\d+)<\/darktable:history_end>/.exec(text)
     const n = Number((end ?? endTag)?.[1] ?? 0)
-    return { editor: 'darktable', hasEdits: n > 0 }
+    if (n === 0) return { editor: 'darktable', hasEdits: false }
+    // Opening a file in darktable writes its automatic modules into the history (the RAW
+    // pipeline defaults, or basic colour handling for a JPEG), with no edit by the user. darktable
+    // records that state as history_auto_hash / history_basic_hash; when the current hash equals
+    // one of them, nothing was edited, and the camera's own preview is the better one to show.
+    const hash = (name: string) =>
+      new RegExp(`darktable:history_${name}_hash\\s*=\\s*"([0-9a-f]+)"`).exec(text)?.[1]
+    const current = hash('current')
+    const untouched =
+      current !== undefined && (current === hash('auto') || current === hash('basic'))
+    return { editor: 'darktable', hasEdits: !untouched }
   }
   if (/crs:|camera-raw-settings/.test(text)) {
     const has =

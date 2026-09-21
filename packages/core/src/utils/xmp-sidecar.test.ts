@@ -63,6 +63,27 @@ describe('classifyXmp', () => {
     expect(classifyXmp(darktable(7))).toEqual({ editor: 'darktable', hasEdits: true })
   })
 
+  it('does not count darktable auto-applied modules as edits', () => {
+    // As written by darktable 5 just from opening a RAF (11 automatic modules) or a JPEG (4).
+    const withHashes = (end: number, hashes: string) =>
+      darktable(end).replace('darktable:history_end', `${hashes} darktable:history_end`)
+    const raf = withHashes(
+      11,
+      'darktable:history_auto_hash="27ef73b9fa2dbbfc4b810f6c23fba868" darktable:history_current_hash="27ef73b9fa2dbbfc4b810f6c23fba868"',
+    )
+    const jpg = withHashes(
+      4,
+      'darktable:history_basic_hash="33e4711b8f6644f5f8c2a164fa3f94cd" darktable:history_current_hash="33e4711b8f6644f5f8c2a164fa3f94cd"',
+    )
+    const edited = withHashes(
+      14,
+      'darktable:history_auto_hash="27ef73b9fa2dbbfc4b810f6c23fba868" darktable:history_current_hash="9b1f0c2e44aa0d5e7c3b6a1f2e8d4c70"',
+    )
+    expect(classifyXmp(raf).hasEdits).toBe(false)
+    expect(classifyXmp(jpg).hasEdits).toBe(false)
+    expect(classifyXmp(edited).hasEdits).toBe(true)
+  })
+
   it('reports Lightroom edits from crs:HasSettings', () => {
     expect(classifyXmp(lightroom(true))).toEqual({ editor: 'lightroom', hasEdits: true })
     expect(classifyXmp(lightroom(false))).toEqual({ editor: 'lightroom', hasEdits: false })
