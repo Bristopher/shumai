@@ -1,5 +1,5 @@
 import { Prisma } from '@shumai/db'
-import { SearchCondition } from '@shumai/dtos'
+import { SearchCondition, expandFileTypes, type FileTypeFilter } from '@shumai/dtos'
 
 export class SqlQueryBuilder {
   private selectSql: Prisma.Sql = Prisma.sql`*`
@@ -36,6 +36,25 @@ export class SqlQueryBuilder {
 
   offset(n: number): this {
     this.offsetCount = n
+    return this
+  }
+
+  /**
+   * Keep files whose last extension is in `filter.include`, and drop those in `filter.exclude`.
+   * Groups ("group:raw") are expanded; matching is case-insensitive. Files with no extension are
+   * kept by an exclude filter and dropped by an include filter.
+   */
+  addFileTypeFilter(filter?: FileTypeFilter): this {
+    const include = expandFileTypes(filter?.include)
+    const exclude = expandFileTypes(filter?.exclude)
+    // The SQL regex is '\.([^.]+)$': the backslash is doubled for the template literal.
+    const ext = Prisma.sql`lower(substring(a.name from '\\.([^.]+)$'))`
+    if (include.length > 0) {
+      this.addWhere(Prisma.sql`${ext} = ANY(${include}::text[])`)
+    }
+    if (exclude.length > 0) {
+      this.addWhere(Prisma.sql`(${ext} IS NULL OR NOT (${ext} = ANY(${exclude}::text[])))`)
+    }
     return this
   }
 
