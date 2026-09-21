@@ -1,3 +1,4 @@
+import { fileTypeFilterSchema } from './file-types'
 import { z } from 'zod'
 import { paginationParamsSchema } from './pagination'
 
@@ -58,6 +59,8 @@ export const searchFilterSchema = z.object({
   query: z.string().optional(),
   isSemantic: z.boolean().optional().default(false),
   previewFormat: previewFormatSchema.optional(),
+  /** File-type filter (extensions and groups), applied to files only, ANDed with conditions. */
+  fileTypes: fileTypeFilterSchema.optional(),
 })
 export type SearchFilter = z.infer<typeof searchFilterSchema>
 

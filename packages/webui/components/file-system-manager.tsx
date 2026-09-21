@@ -9,6 +9,8 @@ import type {
   SearchSort,
 } from '@shumai/dtos'
 import { type FieldInfo as MetadataFieldInfo } from '@shumai/dtos'
+import { isFileTypeFilterActive, type FileTypeFilter as FileTypeFilterValue } from '@shumai/dtos'
+import { fileTypeMetadataKey } from './search/file-type-filter'
 import { useMutation } from '@tanstack/react-query'
 import { InferRequestType, InferResponseType } from 'hono/client'
 
@@ -128,6 +130,11 @@ export default function FileSystemManager({
       setUserMetadata(teamId, sortKey, newSort)
     }
   }
+
+  // File-type filter (FileTypeFilter in the toolbar). It narrows files in place and, unlike
+  // filterConditions, does not switch the browser into a flat recursive search.
+  const fileTypes = metadata[fileTypeMetadataKey(projectId)] as FileTypeFilterValue | undefined
+  const activeFileTypes = isFileTypeFilterActive(fileTypes) ? fileTypes : undefined
 
   const isCollection = !!collection
   const isFiltering = filterConditions.length > 0 || isCollection
@@ -260,7 +267,16 @@ export default function FileSystemManager({
       ? ['projects', projectId, 'recently-deleted', 'file']
       : isRecents
         ? ['projects', projectId, 'recents', 'file']
-        : ['search', teamId, assetId, 'file', filterConditions, sort, isCollection],
+        : [
+            'search',
+            teamId,
+            assetId,
+            'file',
+            filterConditions,
+            sort,
+            isCollection,
+            activeFileTypes,
+          ],
     queryFn: async ({ pageParam }) => {
       if (isRecentlyDeleted) {
         const res = await client.api.projects[':projectId']['recently-deleted'].$get({
@@ -294,6 +310,7 @@ export default function FileSystemManager({
           recursively: isFiltering || isCollection,
           conditions: filterConditions,
           sort,
+          fileTypes: activeFileTypes,
         },
       })
       if (!res.ok) throw new Error('failed to search files')

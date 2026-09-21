@@ -1,7 +1,7 @@
 import { prisma } from '@shumai/db'
 import { Prisma, AssetType, WorkflowTaskType } from '@shumai/db'
 import { AssetService, assetService } from '@shumai/core/src/asset/asset'
-import { AssetInfo } from '@shumai/dtos'
+import { AssetInfo, type FileTypeCount } from '@shumai/dtos'
 import { SearchRequest } from '@shumai/dtos'
 import { PaginatedData, decodeCursor, encodeCursor, PageInfo } from '@shumai/core/src/pagination'
 import { generateSearchNgrams } from '@shumai/core/src/utils/ngram'
@@ -91,6 +91,8 @@ export class SearchService {
         builder.addSearchConditions(req.operator, req.conditions, { skipNameContains: true })
       }
 
+      if (req.assetType !== 'folder') builder.addFileTypeFilter(req.fileTypes)
+
       const nameCond = req.conditions?.find((c) => c.field === 'name' && c.operator === 'contains')
       if (nameCond) {
         const valStr = String(nameCond.value)
@@ -174,6 +176,8 @@ export class SearchService {
         countBuilder.addSearchConditions(req.operator, req.conditions, { skipNameContains: true })
       }
 
+      if (req.assetType !== 'folder') countBuilder.addFileTypeFilter(req.fileTypes)
+
       if (nameCond) {
         const valStr = String(nameCond.value)
         const ngrams = generateSearchNgrams(valStr)
@@ -230,6 +234,8 @@ export class SearchService {
       builder.addSearchConditions(req.operator, req.conditions, { skipNameContains: true })
     }
 
+    if (req.assetType !== 'folder') builder.addFileTypeFilter(req.fileTypes)
+
     // name contains n-grams / Switching Search Optimization
     let countOverride: number | undefined
     let useNgram = false
@@ -266,6 +272,8 @@ export class SearchService {
         if (req.conditions && req.conditions.length > 0) {
           probeBuilder.addSearchConditions(req.operator, req.conditions, { skipNameContains: true })
         }
+
+        if (req.assetType !== 'folder') probeBuilder.addFileTypeFilter(req.fileTypes)
 
         probeBuilder.addWhere(Prisma.sql`a.name_ngram @> ${ngrams}::text[]`)
         probeBuilder.addWhere(Prisma.sql`a.name ILIKE ${'%' + valStr + '%'}`)
@@ -372,6 +380,8 @@ export class SearchService {
         countBuilder.addSearchConditions(req.operator, req.conditions, { skipNameContains: true })
       }
 
+      if (req.assetType !== 'folder') countBuilder.addFileTypeFilter(req.fileTypes)
+
       if (nameCond) {
         countBuilder.addWhere(Prisma.sql`a.name ILIKE ${'%' + valStr + '%'}`)
       }
@@ -413,6 +423,8 @@ export class SearchService {
           countBuilder.addSearchConditions(req.operator, req.conditions, { skipNameContains: true })
         }
 
+        if (req.assetType !== 'folder') countBuilder.addFileTypeFilter(req.fileTypes)
+
         if (nameCond) {
           countBuilder.addWhere(Prisma.sql`a.name ILIKE ${'%' + valStr + '%'}`)
         }
@@ -431,6 +443,30 @@ export class SearchService {
     }
 
     return { data, pageInfo }
+  }
+
+  /**
+   * How many files of each extension a folder holds (lowercase, "" for none), most common
+   * first. Feeds the file-type filter's list of choices.
+   */
+  async fileTypeCounts(folderId: string, recursively = false): Promise<FileTypeCount[]> {
+    const folderIds = recursively
+      ? await this.assetSvc.getDescendantFolderIds(folderId)
+      : [folderId]
+    const fileTypes = [AssetType.file, AssetType.version_stack]
+    const rows = await this.prismaClient.$queryRaw<
+      Array<{ extension: string | null; count: bigint }>
+    >(Prisma.sql`
+      SELECT lower(substring(a.name from '\\.([^.]+)$')) AS extension, count(*) AS count
+      FROM assets a
+      WHERE a.is_deleted = false
+        AND a.parent_id = ANY(${folderIds})
+        AND a.type = ANY(${fileTypes}::"AssetType"[])
+      GROUP BY 1
+      ORDER BY 2 DESC, 1 ASC
+      LIMIT 100
+    `)
+    return rows.map((r) => ({ extension: r.extension ?? '', count: Number(r.count) }))
   }
 }
 

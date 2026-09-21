@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **file-browser**: Add a "Type" filter next to Sort: hide editing and sidecar files such as XMP with one switch, or show only RAW photos, JPEGs, HEIF, videos or any file extension found in the current folder (with counts); the choice is remembered per project
+
 ### Fixed
 
 - **docker**: Fix an issue where the bundled PostgreSQL container published port 5432 on the host, causing deployment to fail on machines where that port was already in use; the database is now only reachable by Shumai itself
