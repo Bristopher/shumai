@@ -314,7 +314,7 @@ describe('TranscodeService', () => {
     const outputFile = path.join(tempDir, 'output.webp')
     await transcodeService.transcodeImage('input.png', outputFile, 300, 80, { isPreview: true })
 
-    expect(sharp).toHaveBeenCalledWith('input.png', { limitInputPixels: false })
+    expect(sharp).toHaveBeenCalledWith('input.png', { limitInputPixels: false, autoOrient: true })
     const mockSharp = vi.mocked(sharp).mock.results[0].value
     expect(mockSharp.toColorspace).toHaveBeenCalledWith('srgb')
     expect(mockSharp.resize).toHaveBeenCalledWith(400, 300, expect.any(Object))
@@ -510,6 +510,59 @@ describe('TranscodeService', () => {
     expect(execFile).not.toHaveBeenCalled()
   })
 
+  it('should apply EXIF orientation when transcoding a rotated photo', async () => {
+    // A camera portrait: stored 7728x5152 (landscape) with EXIF orientation 8, shown 5152x7728.
+    const mockRotated = {
+      resize: vi.fn().mockReturnThis(),
+      toColorspace: vi.fn().mockReturnThis(),
+      webp: vi.fn().mockReturnThis(),
+      toFile: vi.fn().mockResolvedValue({}),
+      metadata: vi.fn().mockResolvedValue({
+        width: 7728,
+        height: 5152,
+        orientation: 8,
+        autoOrient: { width: 5152, height: 7728 },
+        format: 'jpeg',
+      }),
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.mocked(sharp).mockReturnValueOnce(mockRotated as any)
+
+    await transcodeService.transcodeImage(
+      'DSCF5056.JPG',
+      path.join(tempDir, 'rotated.webp'),
+      300,
+      80,
+      { isPreview: true },
+    )
+
+    expect(sharp).toHaveBeenCalledWith(
+      'DSCF5056.JPG',
+      expect.objectContaining({ autoOrient: true }),
+    )
+    // Portrait preview: 300 wide on the short edge, not a 450x300 landscape one.
+    expect(mockRotated.resize).toHaveBeenCalledWith(300, 450, expect.any(Object))
+  })
+
+  it('should report the displayed size of a rotated photo', async () => {
+    const mockRotated = {
+      metadata: vi.fn().mockResolvedValue({
+        width: 7728,
+        height: 5152,
+        orientation: 8,
+        autoOrient: { width: 5152, height: 7728 },
+        format: 'jpeg',
+      }),
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.mocked(sharp).mockReturnValueOnce(mockRotated as any)
+
+    const info = await transcodeService.getImageInfo('DSCF5056.JPG')
+
+    expect(info.originalWidth).toBe(5152)
+    expect(info.originalHeight).toBe(7728)
+  })
+
   it('should fetch image if input is a URL', async () => {
     const mockBuffer = Buffer.from('fake-image-data')
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -522,7 +575,10 @@ describe('TranscodeService', () => {
     await transcodeService.transcodeImage('http://example.com/image.png', outputFile, 480, 80)
 
     expect(global.fetch).toHaveBeenCalledWith('http://example.com/image.png')
-    expect(sharp).toHaveBeenCalledWith(expect.any(Buffer), { limitInputPixels: false })
+    expect(sharp).toHaveBeenCalledWith(expect.any(Buffer), {
+      limitInputPixels: false,
+      autoOrient: true,
+    })
   })
 
   it('should support Buffer as input for image transcoding', async () => {
@@ -530,7 +586,7 @@ describe('TranscodeService', () => {
     const outputFile = path.join(tempDir, 'output-buffer.webp')
     await transcodeService.transcodeImage(inputBuffer, outputFile, 480, 80)
 
-    expect(sharp).toHaveBeenCalledWith(inputBuffer, { limitInputPixels: false })
+    expect(sharp).toHaveBeenCalledWith(inputBuffer, { limitInputPixels: false, autoOrient: true })
     const mockSharp = vi.mocked(sharp).mock.results[vi.mocked(sharp).mock.results.length - 1].value
     expect(mockSharp.toColorspace).toHaveBeenCalledWith('srgb')
     expect(mockSharp.resize).toHaveBeenCalledWith(400, 300, expect.any(Object))
