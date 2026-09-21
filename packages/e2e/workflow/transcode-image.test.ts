@@ -214,5 +214,90 @@ describe.each(['local', 'temporal'] as const)(
       expect(mediaInfo.imageTranscodes.length).toBeGreaterThan(0)
       expect(mediaInfo.thumbnail).toBeDefined()
     }, 50000)
+
+    it('should run transcodeMedia workflow for a camera RAW asset from its embedded preview', async () => {
+      // 1. Seed Database. RAW files arrive as octet-stream from browsers and the CLI.
+      const team = await prisma.team.create({
+        data: { name: 'E2E RAW Transcode Team' },
+      })
+
+      const project = await prisma.project.create({
+        data: { name: 'E2E RAW Transcode Project', teamId: team.id },
+      })
+
+      const storageKey = await prisma.storageKey.create({
+        data: {
+          key: 'projects/e2e/small.RAF',
+        },
+      })
+
+      const asset = await prisma.asset.create({
+        data: {
+          name: 'small.RAF',
+          type: 'file',
+          status: 'uploaded',
+          mediaType: 'application/octet-stream',
+          projectId: project.id,
+          storageKeyId: storageKey.id,
+        },
+      })
+
+      // 2. Seed S3 Storage from fixture small.raf: a RAF header around a real 600x400 JPEG
+      // preview tagged EXIF orientation 6, so the displayed image is 400x600.
+      const rafPath = path.join(fixturesDir, 'small.raf')
+      const rafBuffer = fs.readFileSync(rafPath)
+      await s3Service.putObject(
+        'shumai-e2e-test-bucket-transcode',
+        'projects/e2e/small.RAF',
+        rafBuffer,
+        rafBuffer.length,
+        'application/octet-stream',
+      )
+
+      // 3. Create Workflow Task
+      const task = await prisma.workflowTask.create({
+        data: {
+          type: 'transcode_image',
+          status: 'pending',
+          assetId: asset.id,
+          projectId: project.id,
+          teamId: team.id,
+          payload: {
+            projectId: project.id,
+            transcode: {
+              thumbnail: true,
+            },
+          },
+        },
+      })
+
+      // 4. Wait for workflow to complete
+      console.log(
+        `Submitted E2E RAW Image Transcode Workflow Task. ID: ${task.id}. Awaiting completion...`,
+      )
+      const completedTask = await workflowService.executeWait(task, 45000)
+
+      // 5. Verification
+      expect(completedTask.status).toBe('completed')
+
+      const updatedAsset = await prisma.asset.findUnique({
+        where: { id: asset.id },
+      })
+      expect(updatedAsset?.status).toBe(AssetStatus.processed)
+
+      const mediaInfo = updatedAsset?.media as unknown as {
+        proxyType: string
+        imageTranscodes: unknown[]
+        thumbnail: unknown
+        metadata: { originalWidth: number; originalHeight: number }
+      }
+      expect(mediaInfo).toBeDefined()
+      expect(mediaInfo.proxyType).toBe('image')
+      expect(mediaInfo.imageTranscodes).toBeDefined()
+      expect(mediaInfo.imageTranscodes.length).toBeGreaterThan(0)
+      expect(mediaInfo.thumbnail).toBeDefined()
+      expect(mediaInfo.metadata.originalWidth).toBe(400)
+      expect(mediaInfo.metadata.originalHeight).toBe(600)
+    }, 50000)
   },
 )

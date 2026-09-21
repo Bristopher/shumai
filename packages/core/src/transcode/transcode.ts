@@ -8,10 +8,12 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import PDFDocument from 'pdfkit'
-import sharp from 'sharp'
+import sharp, { type Sharp } from 'sharp'
 import { ulid } from 'ulid'
 import { promisify } from 'util'
 import { mapConcurrent } from '../utils/async'
+import { isRawImage } from '../utils/mime'
+import { extractRawPreviewFromFile, getRawPreviewSizeFromFile } from '../utils/raw-preview'
 import { dataFormatNames } from './dataFormatNames'
 
 const execFileAsync = promisify(execFile)
@@ -256,6 +258,45 @@ export function isPsdInput(input: string | Buffer): boolean {
     input[3] === 0x53
   )
 }
+/**
+ * Camera RAW input (RAF, ARW, NEF, DNG, ...). Detection is by extension, because the formats
+ * that share TIFF's magic bytes cannot be told from a plain TIFF by content alone.
+ */
+export function isRawInputFile(inputFile: string | Buffer): inputFile is string {
+  if (typeof inputFile !== 'string') return false
+  let name = inputFile
+  if (inputFile.startsWith('http')) {
+    try {
+      name = new URL(inputFile).pathname
+    } catch {
+      return false
+    }
+  }
+  return isRawImage(null, name)
+}
+
+/** Apply an EXIF orientation (1..8) to a sharp pipeline. flip/flop run before rotate in sharp. */
+export function applyExifOrientation(image: Sharp, orientation: number): Sharp {
+  switch (orientation) {
+    case 2:
+      return image.flop()
+    case 3:
+      return image.rotate(180)
+    case 4:
+      return image.flip()
+    case 5:
+      return image.flop().rotate(270)
+    case 6:
+      return image.rotate(90)
+    case 7:
+      return image.flop().rotate(90)
+    case 8:
+      return image.rotate(270)
+    default:
+      return image
+  }
+}
+
 export function calculatePreviewDimensions(
   origW: number,
   origH: number,
@@ -304,6 +345,107 @@ export class TranscodeService {
       }
       throw err
     }
+  }
+
+  /**
+   * Run `fn` against a local RAW file. `input` is already a local path in the workflows; a
+   * fetched URL arrives as a Buffer and is written to a temp file that keeps the extension,
+   * because the RAW parser and LibRaw both need random access and the format hint.
+   */
+  private async withLocalRawFile<T>(
+    inputFile: string,
+    input: string | Buffer,
+    fn: (rawPath: string) => Promise<T>,
+  ): Promise<T> {
+    if (typeof input === 'string') return fn(input)
+    const tempDir = this.createTempDir('raw-')
+    try {
+      const ext = path.extname(new URL(inputFile).pathname) || '.raw'
+      const rawPath = path.join(tempDir, `input${ext}`)
+      fs.writeFileSync(rawPath, input)
+      return await fn(rawPath)
+    } finally {
+      this.removeDir(tempDir)
+    }
+  }
+
+  private async getRawImageInfo(rawPath: string): Promise<MediaMetadata> {
+    // The embedded preview is what gets transcoded, so its (oriented) size is the asset's
+    // displayed size. LibRaw's sensor size is only the fallback when there is no preview.
+    const size = getRawPreviewSizeFromFile(rawPath) ?? (await this.execImageMagickIdentify(rawPath))
+    return {
+      originalWidth: size.width,
+      originalHeight: size.height,
+      duration: 0,
+      bitRate: 0,
+      frameRate: 0,
+      totalFrames: 0,
+      startTimecode: undefined,
+      hasAudio: false,
+      mimeType: 'raw',
+    }
+  }
+
+  /**
+   * RAW to webp. Uses the JPEG the camera embedded (milliseconds, and it carries the camera's
+   * own rendering such as Fujifilm film simulations), choosing the smallest preview that still
+   * covers the target. Falls back to a full LibRaw decode through ImageMagick only when the file
+   * has no usable preview.
+   */
+  private async transcodeRawImage(
+    rawPath: string,
+    outputFile: string,
+    quality: number,
+    target: { width: number; height: number; isPreview: boolean; previewShort: number },
+  ): Promise<void> {
+    const previewLong = Math.round((target.previewShort * 16) / 9)
+    const edge = target.isPreview ? previewLong : Math.max(target.width, target.height)
+    const extracted = extractRawPreviewFromFile(rawPath, edge)
+
+    if (extracted) {
+      const turned = extracted.orientation >= 5 && extracted.orientation <= 8
+      const shownW = turned ? extracted.height : extracted.width
+      const shownH = turned ? extracted.width : extracted.height
+      const dims = target.isPreview
+        ? calculatePreviewDimensions(shownW, shownH, target.previewShort, previewLong)
+        : { width: target.width, height: target.height }
+
+      const image = applyExifOrientation(
+        sharp(extracted.jpeg, { limitInputPixels: false }),
+        extracted.orientation,
+      )
+      await image
+        .toColorspace('srgb')
+        .resize(dims.width, dims.height, { withoutEnlargement: true, fit: 'inside' })
+        .webp({ quality })
+        .toFile(outputFile)
+      return
+    }
+
+    // No embedded preview: demosaic with the LibRaw built into ImageMagick. The box is square
+    // on the long edge because -auto-orient may turn the image after identify measured it.
+    let box = Math.max(target.width, target.height)
+    if (target.isPreview) {
+      const sensor = await this.execImageMagickIdentify(rawPath)
+      const dims = calculatePreviewDimensions(
+        sensor.width,
+        sensor.height,
+        target.previewShort,
+        previewLong,
+      )
+      box = Math.max(dims.width, dims.height)
+    }
+    await this.execImageMagick([
+      rawPath,
+      '-auto-orient',
+      '-colorspace',
+      'sRGB',
+      '-resize',
+      `${box}x${box}>`,
+      '-quality',
+      quality.toString(),
+      outputFile,
+    ])
   }
 
   private async execImageMagickIdentify(
@@ -463,6 +605,10 @@ export class TranscodeService {
         throw new Error(`Failed to fetch image from ${inputFile}: ${resp.statusText}`)
       }
       input = Buffer.from(await resp.arrayBuffer())
+    }
+
+    if (isRawInputFile(inputFile)) {
+      return this.withLocalRawFile(inputFile, input, (rawPath) => this.getRawImageInfo(rawPath))
     }
 
     if (isPsdInput(input)) {
@@ -677,6 +823,20 @@ export class TranscodeService {
     const WEBP_MAX_DIMENSION = 7680
     let targetW = width > 0 ? Math.min(width, WEBP_MAX_DIMENSION) : WEBP_MAX_DIMENSION
     let targetH = height && height > 0 ? Math.min(height, WEBP_MAX_DIMENSION) : WEBP_MAX_DIMENSION
+
+    if (isRawInputFile(inputFile)) {
+      const target = {
+        width: targetW,
+        height: targetH,
+        isPreview,
+        // Same legacy shim as below: a width of 480 means a 300 px short edge.
+        previewShort: width === 480 ? 300 : width,
+      }
+      await this.withLocalRawFile(inputFile, input, (rawPath) =>
+        this.transcodeRawImage(rawPath, outputFile, quality, target),
+      )
+      return
+    }
 
     const sharpInstance = sharp(input, { limitInputPixels: false })
 

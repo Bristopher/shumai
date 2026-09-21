@@ -66,6 +66,45 @@ export function isCsvDocument(mediaType?: string | null, filename?: string | nul
   return lowerMediaType === 'text/csv' || lowerFilename.endsWith('.csv')
 }
 
+/**
+ * Camera RAW formats. Browsers and Bun report most of them as `application/octet-stream`, so
+ * detection goes by extension; the few browsers that send a vendor type (for example
+ * `image/x-sony-arw`) are covered by the same check.
+ */
+export const RAW_IMAGE_EXTENSIONS = [
+  '.raf',
+  '.arw',
+  '.srf',
+  '.sr2',
+  '.dng',
+  '.cr2',
+  '.cr3',
+  '.nef',
+  '.nrw',
+  '.orf',
+  '.rw2',
+  '.pef',
+  '.srw',
+] as const
+
+export function isRawImage(mediaType?: string | null, filename?: string | null): boolean {
+  const lowerFilename = filename?.toLowerCase() || ''
+  if (RAW_IMAGE_EXTENSIONS.some((ext) => lowerFilename.endsWith(ext))) return true
+  const lowerMediaType = mediaType?.toLowerCase() || ''
+  return (
+    lowerMediaType === 'image/x-adobe-dng' ||
+    lowerMediaType === 'image/x-dcraw' ||
+    lowerMediaType.startsWith('image/x-sony-') ||
+    lowerMediaType.startsWith('image/x-fuji-') ||
+    lowerMediaType.startsWith('image/x-canon-') ||
+    lowerMediaType.startsWith('image/x-nikon-') ||
+    lowerMediaType.startsWith('image/x-olympus-') ||
+    lowerMediaType.startsWith('image/x-panasonic-') ||
+    lowerMediaType.startsWith('image/x-pentax-') ||
+    lowerMediaType.startsWith('image/x-samsung-')
+  )
+}
+
 export function getProxyType(
   mediaType?: string | null,
   filename?: string | null,
@@ -73,7 +112,12 @@ export function getProxyType(
   const lowerMediaType = mediaType?.toLowerCase() || ''
   const lowerFilename = filename?.toLowerCase() || ''
 
-  if (lowerMediaType.startsWith('image/') || lowerFilename.endsWith('.psd')) return 'image'
+  if (
+    lowerMediaType.startsWith('image/') ||
+    lowerFilename.endsWith('.psd') ||
+    isRawImage(mediaType, filename)
+  )
+    return 'image'
   if (lowerMediaType.startsWith('video/')) return 'video'
   if (lowerMediaType.startsWith('audio/')) return 'audio'
 

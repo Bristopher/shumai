@@ -16,6 +16,7 @@ import * as fs from 'fs'
 import { WorkflowTask } from '@shumai/db'
 import { setupTestDbHooks } from '@shumai/db/test'
 import sharp from 'sharp'
+import { TAG, fakeJpeg, fakeRaf, fakeTiff } from '../utils/raw-preview.test-helpers'
 
 vi.mock('@shumai/core/src/s3/s3', () => ({
   s3Service: {
@@ -34,6 +35,9 @@ vi.mock('child_process', () => ({
 vi.mock('sharp', () => {
   const mockSharp = {
     resize: vi.fn().mockReturnThis(),
+    rotate: vi.fn().mockReturnThis(),
+    flip: vi.fn().mockReturnThis(),
+    flop: vi.fn().mockReturnThis(),
     toColorspace: vi.fn().mockReturnThis(),
     webp: vi.fn().mockReturnThis(),
     composite: vi.fn().mockReturnThis(),
@@ -442,6 +446,68 @@ describe('TranscodeService', () => {
     expect(info.originalWidth).toBe(1920)
     expect(info.originalHeight).toBe(1080)
     expect(info.mimeType).toBe('psd')
+  })
+
+  it('should transcode a RAW from its embedded preview, applying the EXIF orientation', async () => {
+    const jpeg = fakeJpeg(4416, 2944, { orientation: 6 })
+    const rafPath = path.join(tempDir, 'DSCF5056.RAF')
+    fs.writeFileSync(rafPath, fakeRaf(jpeg))
+    const outputFile = path.join(tempDir, 'raf-preview.webp')
+
+    await transcodeService.transcodeImage(rafPath, outputFile, 300, 80, { isPreview: true })
+
+    const sharpMock = vi.mocked(sharp)
+    expect(sharpMock).toHaveBeenCalledTimes(1)
+    const input = sharpMock.mock.calls[0][0] as unknown as Buffer
+    expect(Buffer.isBuffer(input) && input.equals(jpeg)).toBe(true)
+    const pipeline = sharpMock.mock.results[0].value
+    expect(pipeline.rotate).toHaveBeenCalledWith(90)
+    expect(pipeline.webp).toHaveBeenCalledWith({ quality: 80 })
+    expect(execFile).not.toHaveBeenCalled()
+  })
+
+  it('should fall back to an ImageMagick RAW decode when there is no embedded preview', async () => {
+    vi.mocked(execFile).mockImplementation((cmd: unknown, args: unknown, callback: unknown) => {
+      const cb = callback as (
+        err: Error | null,
+        result: { stdout: string; stderr: string },
+        extra: string,
+      ) => void
+      const argsArr = args as string[] | undefined
+      if (cmd === 'magick' && argsArr && argsArr[0] === 'identify') {
+        cb(null, { stdout: '6000 4000\n', stderr: '' }, '')
+      } else if (typeof cb === 'function') {
+        cb(null, { stdout: '', stderr: '' }, '')
+      }
+      return {} as ReturnType<typeof execFile>
+    })
+    const arwPath = path.join(tempDir, 'DSC00001.ARW')
+    fs.writeFileSync(
+      arwPath,
+      fakeTiff([{ entries: [{ tag: TAG.imageWidth, type: 4, value: 6000 }], next: null }], []),
+    )
+    const outputFile = path.join(tempDir, 'arw-preview.webp')
+
+    await transcodeService.transcodeImage(arwPath, outputFile, 300, 80, { isPreview: true })
+
+    expect(execFile).toHaveBeenCalledWith(
+      'magick',
+      expect.arrayContaining([arwPath, '-auto-orient', '-colorspace', 'sRGB', '-quality', '80']),
+      expect.any(Function),
+    )
+    expect(sharp).not.toHaveBeenCalled()
+  })
+
+  it('should report a RAW image size from its oriented embedded preview', async () => {
+    const rafPath = path.join(tempDir, 'DSCF5056.RAF')
+    fs.writeFileSync(rafPath, fakeRaf(fakeJpeg(4416, 2944, { orientation: 6 })))
+
+    const info = await transcodeService.getImageInfo(rafPath)
+
+    expect(info.originalWidth).toBe(2944)
+    expect(info.originalHeight).toBe(4416)
+    expect(info.mimeType).toBe('raw')
+    expect(execFile).not.toHaveBeenCalled()
   })
 
   it('should fetch image if input is a URL', async () => {

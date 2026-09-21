@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **transcode**: Camera RAW photos (Fujifilm RAF, Sony ARW, Nikon NEF, Canon CR2, DNG and more) now show thumbnails and previews instead of a generic file icon, using the preview image the camera already stores inside each file, so they appear in milliseconds and keep the camera's own look, such as Fujifilm film simulations
+
 ### Fixed
 
 - **docker**: Fix an issue where the bundled PostgreSQL container published port 5432 on the host, causing deployment to fail on machines where that port was already in use; the database is now only reachable by Shumai itself

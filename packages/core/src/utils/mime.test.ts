@@ -6,6 +6,7 @@ import {
   isHtmlDocument,
   isMarkdownDocument,
   isCsvDocument,
+  isRawImage,
 } from './mime'
 
 describe('detectSupportedMimeType', () => {
@@ -92,6 +93,13 @@ describe('getProxyType', () => {
     expect(getProxyType(null, 'design.psd')).toBe('image')
   })
 
+  it('should detect camera RAW files as images even when typed as octet-stream', () => {
+    expect(getProxyType('application/octet-stream', 'DSCF5056.RAF')).toBe('image')
+    expect(getProxyType('application/octet-stream', 'DSC00123.ARW')).toBe('image')
+    expect(getProxyType(null, 'IMG_0001.CR3')).toBe('image')
+    expect(getProxyType('image/x-sony-arw', 'DSC00123.ARW')).toBe('image')
+  })
+
   it('should detect video proxyType', () => {
     expect(getProxyType('video/mp4', 'clip.mp4')).toBe('video')
   })
@@ -115,5 +123,36 @@ describe('getProxyType', () => {
   it('should return null for unsupported files', () => {
     expect(getProxyType('application/zip', 'archive.zip')).toBeNull()
     expect(getProxyType(null, 'unknown.bin')).toBeNull()
+  })
+})
+
+describe('isRawImage', () => {
+  it('should match RAW extensions case-insensitively', () => {
+    for (const name of [
+      'a.raf',
+      'a.ARW',
+      'a.dng',
+      'a.Cr2',
+      'a.CR3',
+      'a.nef',
+      'a.orf',
+      'a.rw2',
+      'a.pef',
+      'a.srw',
+    ]) {
+      expect(isRawImage(null, name)).toBe(true)
+    }
+  })
+
+  it('should match vendor RAW media types', () => {
+    expect(isRawImage('image/x-sony-arw', 'noext')).toBe(true)
+    expect(isRawImage('image/x-fuji-raf', null)).toBe(true)
+    expect(isRawImage('image/x-adobe-dng', null)).toBe(true)
+  })
+
+  it('should not match ordinary images or sidecars', () => {
+    expect(isRawImage('image/jpeg', 'DSCF5056.JPG')).toBe(false)
+    expect(isRawImage('application/rdf+xml', 'DSCF5056.RAF.xmp')).toBe(false)
+    expect(isRawImage('image/tiff', 'scan.tif')).toBe(false)
   })
 })
