@@ -93,6 +93,11 @@ describe('getProxyType', () => {
     expect(getProxyType(null, 'design.psd')).toBe('image')
   })
 
+  it('should preview XMP sidecars as images (the photo they describe)', () => {
+    expect(getProxyType('application/rdf+xml', 'DSCF5056.RAF.xmp')).toBe('image')
+    expect(getProxyType(null, '_DSC2028.XMP')).toBe('image')
+  })
+
   it('should detect camera RAW files as images even when typed as octet-stream', () => {
     expect(getProxyType('application/octet-stream', 'DSCF5056.RAF')).toBe('image')
     expect(getProxyType('application/octet-stream', 'DSC00123.ARW')).toBe('image')

@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **transcode**: Camera RAW photos (Fujifilm RAF, Sony ARW, Nikon NEF, Canon CR2, DNG and more) now show thumbnails and previews instead of a generic file icon, using the preview image the camera already stores inside each file, so they appear in milliseconds and keep the camera's own look, such as Fujifilm film simulations
+- **transcode**: XMP sidecar files (from darktable, Lightroom and others) now show a preview of the photo they belong to instead of a blank file icon; edits made in darktable are applied to that preview, so you can see the edited look right next to the original
 
 ### Fixed
 

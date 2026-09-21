@@ -27,6 +27,9 @@ import {
   transcodeVideoChunkActivity,
   deleteS3ObjectActivity,
   createAutofillTaskIfEnabledActivity,
+  resolveXmpSourceActivity,
+  renderXmpPreviewActivity,
+  requeueXmpSiblingsActivity,
 } from './transcode'
 
 vi.mock('@shumai/core/src/s3/s3', () => ({
@@ -75,6 +78,7 @@ vi.mock('@shumai/core/src/transcode/transcode', async (importOriginal) => {
       takeScreenshots: vi.fn(),
       overlayAnnotations: vi.fn(),
       renderPdfPages: vi.fn(),
+      renderXmpWithDarktable: vi.fn(),
     },
   }
 })
@@ -1488,6 +1492,157 @@ describe('Transcode Activities', () => {
       expect(task?.status).toBe('pending')
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((task?.payload as any)?.agent?.agentId).toBe(autofillAgent.id)
+    })
+  })
+})
+
+describe('XMP sidecar activities', () => {
+  setupTestDbHooks()
+
+  const darktableXmp = (historyEnd: number) =>
+    `<x:xmpmeta><rdf:RDF><rdf:Description darktable:xmp_version="5" darktable:history_end="${historyEnd}"/></rdf:RDF></x:xmpmeta>`
+  const lightroomXmp =
+    '<x:xmpmeta><rdf:RDF><rdf:Description crs:HasSettings="True" crs:Exposure2012="+0.35"/></rdf:RDF></x:xmpmeta>'
+
+  async function seedFolder(files: Array<{ name: string; status?: 'uploading' | 'processed' }>) {
+    const team = await prisma.team.create({ data: { name: 'XMP Team' } })
+    const project = await prisma.project.create({ data: { name: 'XMP Project', teamId: team.id } })
+    const folder = await prisma.asset.create({
+      data: { name: 'Roadtrip', type: 'folder', status: 'processed', projectId: project.id },
+    })
+    const ids: Record<string, string> = {}
+    for (const f of files) {
+      const storageKey = await prisma.storageKey.create({ data: { key: `files/x/${f.name}` } })
+      const a = await prisma.asset.create({
+        data: {
+          name: f.name,
+          type: 'file',
+          status: f.status ?? 'processed',
+          projectId: project.id,
+          parentId: folder.id,
+          storageKeyId: storageKey.id,
+        },
+      })
+      ids[f.name] = a.id
+    }
+    return { team, project, ids }
+  }
+
+  describe('resolveXmpSourceActivity', () => {
+    it('finds the photo a darktable NAME.EXT.xmp describes', async () => {
+      const { ids } = await seedFolder([
+        { name: 'DSCF5056.JPG' },
+        { name: 'DSCF5056.RAF' },
+        { name: 'DSCF5056.RAF.xmp' },
+      ])
+      await expect(resolveXmpSourceActivity({ assetId: ids['DSCF5056.RAF.xmp'] })).resolves.toEqual(
+        {
+          key: 'files/x/DSCF5056.RAF',
+          name: 'DSCF5056.RAF',
+        },
+      )
+    })
+
+    it('prefers the RAW for a Lightroom NAME.xmp', async () => {
+      const { ids } = await seedFolder([
+        { name: '_DSC2028.JPG' },
+        { name: '_DSC2028.ARW' },
+        { name: '_DSC2028.xmp' },
+      ])
+      const got = await resolveXmpSourceActivity({ assetId: ids['_DSC2028.xmp'] })
+      expect(got?.name).toBe('_DSC2028.ARW')
+    })
+
+    it('returns null while the photo is still uploading, or for a non-XMP asset', async () => {
+      const { ids } = await seedFolder([
+        { name: 'DSCF5057.RAF', status: 'uploading' },
+        { name: 'DSCF5057.RAF.xmp' },
+      ])
+      await expect(
+        resolveXmpSourceActivity({ assetId: ids['DSCF5057.RAF.xmp'] }),
+      ).resolves.toBeNull()
+      await expect(resolveXmpSourceActivity({ assetId: ids['DSCF5057.RAF'] })).resolves.toBeNull()
+    })
+  })
+
+  describe('renderXmpPreviewActivity', () => {
+    const xmpText = (text: string) =>
+      vi
+        .mocked(fs.readFileSync)
+        .mockImplementation(((_p: unknown, options?: unknown) =>
+          options ? text : Buffer.from('fake data')) as never)
+
+    it('uses the photo itself when the sidecar has no edits', async () => {
+      xmpText(darktableXmp(0))
+      const got = await renderXmpPreviewActivity({ xmpPath: '/t/a.RAF.xmp', photoPath: '/p/a.RAF' })
+      expect(got).toEqual({ path: '/p/a.RAF', outcome: 'no_edits', editor: 'darktable' })
+      expect(transcodeService.renderXmpWithDarktable).not.toHaveBeenCalled()
+    })
+
+    it('does not try to render Lightroom edits', async () => {
+      xmpText(lightroomXmp)
+      const got = await renderXmpPreviewActivity({ xmpPath: '/t/a.xmp', photoPath: '/p/a.ARW' })
+      expect(got).toEqual({ path: '/p/a.ARW', outcome: 'not_rendered', editor: 'lightroom' })
+      expect(transcodeService.renderXmpWithDarktable).not.toHaveBeenCalled()
+    })
+
+    it('renders darktable edits and returns the rendered JPEG', async () => {
+      xmpText(darktableXmp(4))
+      vi.mocked(transcodeService.renderXmpWithDarktable).mockResolvedValueOnce('applied')
+      const got = await renderXmpPreviewActivity({ xmpPath: '/t/a.RAF.xmp', photoPath: '/p/a.RAF' })
+      expect(got.outcome).toBe('applied')
+      expect(got.path).toMatch(/[\\/]t[\\/]xmp-render-.+\.jpg$/)
+      expect(transcodeService.renderXmpWithDarktable).toHaveBeenCalledWith(
+        '/p/a.RAF',
+        '/t/a.RAF.xmp',
+        got.path,
+      )
+    })
+
+    it('falls back to the photo when darktable is not installed', async () => {
+      xmpText(darktableXmp(4))
+      vi.mocked(transcodeService.renderXmpWithDarktable).mockResolvedValueOnce(
+        'renderer_unavailable',
+      )
+      const got = await renderXmpPreviewActivity({ xmpPath: '/t/a.RAF.xmp', photoPath: '/p/a.RAF' })
+      expect(got).toEqual({
+        path: '/p/a.RAF',
+        outcome: 'renderer_unavailable',
+        editor: 'darktable',
+      })
+    })
+  })
+
+  describe('requeueXmpSiblingsActivity', () => {
+    it('queues one preview for a sidecar that finished before its photo, and only once', async () => {
+      const { ids } = await seedFolder([
+        { name: 'DSCF5056.RAF' },
+        { name: 'DSCF5056.RAF.xmp' },
+        { name: 'DSCF5056.JPG.xmp' },
+      ])
+
+      await expect(requeueXmpSiblingsActivity({ assetId: ids['DSCF5056.RAF'] })).resolves.toBe(1)
+      await expect(requeueXmpSiblingsActivity({ assetId: ids['DSCF5056.RAF'] })).resolves.toBe(0)
+
+      const tasks = await prisma.workflowTask.findMany({
+        where: { assetId: ids['DSCF5056.RAF.xmp'] },
+      })
+      expect(tasks).toHaveLength(1)
+      expect(tasks[0].type).toBe('transcode_image')
+      // The local executor may already have claimed it.
+      expect(['pending', 'processing']).toContain(tasks[0].status)
+    })
+
+    it('skips sidecars that already have a preview, and does nothing for a sidecar itself', async () => {
+      const { ids } = await seedFolder([{ name: 'DSCF5060.RAF' }, { name: 'DSCF5060.RAF.xmp' }])
+      await prisma.asset.update({
+        where: { id: ids['DSCF5060.RAF.xmp'] },
+        data: { media: { proxyType: 'image' } as never },
+      })
+      await expect(requeueXmpSiblingsActivity({ assetId: ids['DSCF5060.RAF'] })).resolves.toBe(0)
+      await expect(requeueXmpSiblingsActivity({ assetId: ids['DSCF5060.RAF.xmp'] })).resolves.toBe(
+        0,
+      )
     })
   })
 })

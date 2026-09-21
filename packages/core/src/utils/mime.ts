@@ -115,7 +115,9 @@ export function getProxyType(
   if (
     lowerMediaType.startsWith('image/') ||
     lowerFilename.endsWith('.psd') ||
-    isRawImage(mediaType, filename)
+    isRawImage(mediaType, filename) ||
+    // An XMP sidecar previews as the photo it describes (see utils/xmp-sidecar.ts).
+    lowerFilename.endsWith('.xmp')
   )
     return 'image'
   if (lowerMediaType.startsWith('video/')) return 'video'

@@ -1,10 +1,11 @@
-import { AssetStatus, prisma, WorkflowTaskType, WorkflowTaskStatus } from '@shumai/db'
+import { AssetStatus, Prisma, prisma, WorkflowTaskType, WorkflowTaskStatus } from '@shumai/db'
 import { s3Service } from '@shumai/core/src/s3/s3'
 import { transcodeService } from '@shumai/core/src/transcode/transcode'
 import { metadataService } from '@shumai/core/src/metadata/metadata'
 import { getDerivedArtifactDirectory, stemFromKey } from '@shumai/core/src/utils/filename'
 import { gotenbergService } from '@shumai/core/src/gotenberg/gotenberg'
 import { parseCsvContent } from '@shumai/core/src/transcode/transcode'
+import { classifyXmp, isXmpSidecar, pickXmpSource } from '@shumai/core/src/utils/xmp-sidecar'
 import {
   getProxyType,
   isCsvDocument,
@@ -1261,4 +1262,125 @@ export async function transcodeVideoChunkActivity(
 export async function deleteS3ObjectActivity(params: { key: string }): Promise<void> {
   const bucket = process.env.S3_BUCKET || 'shumai'
   await s3Service.deleteObject(bucket, params.key)
+}
+
+// --- XMP sidecars ---------------------------------------------------------------------------
+//
+// An `.xmp` previews as the photo it describes, rendered with its edits when they are darktable
+// edits (docs: SHUMAI-011). The photo is found by name in the same folder; when it is not there
+// yet, the XMP finishes without media and is re-queued once the photo is processed.
+
+const XMP_SOURCE_STATUSES = [AssetStatus.uploaded, AssetStatus.processing, AssetStatus.processed]
+
+export async function resolveXmpSourceActivity(params: {
+  assetId: string
+}): Promise<{ key: string; name: string } | null> {
+  const xmp = await prisma.asset.findUnique({
+    where: { id: params.assetId },
+    select: { name: true, parentId: true, projectId: true },
+  })
+  if (!xmp || !isXmpSidecar(xmp.name)) return null
+
+  // Every candidate starts with the sidecar's stem (NAME of NAME.xmp / NAME.EXT.xmp).
+  const stem = xmp.name.slice(0, xmp.name.indexOf('.') > 0 ? xmp.name.indexOf('.') : undefined)
+  const siblings = await prisma.asset.findMany({
+    where: {
+      id: { not: params.assetId },
+      parentId: xmp.parentId,
+      projectId: xmp.projectId,
+      type: 'file',
+      isDeleted: false,
+      status: { in: XMP_SOURCE_STATUSES },
+      name: { startsWith: stem, mode: 'insensitive' },
+    },
+    select: { name: true, storageKey: { select: { key: true } } },
+  })
+  const name = pickXmpSource(
+    xmp.name,
+    siblings.map((s) => s.name),
+  )
+  const hit = siblings.find((s) => s.name === name)
+  return hit?.storageKey?.key ? { key: hit.storageKey.key, name: hit.name } : null
+}
+
+export type XmpRenderOutcome =
+  'applied' | 'not_rendered' | 'no_edits' | 'renderer_unavailable' | 'failed'
+
+export async function renderXmpPreviewActivity(params: {
+  xmpPath: string
+  photoPath: string
+}): Promise<{ path: string; outcome: XmpRenderOutcome; editor: string }> {
+  const text = fs.readFileSync(params.xmpPath, 'utf8')
+  const { editor, hasEdits } = classifyXmp(text)
+
+  if (!hasEdits) return { path: params.photoPath, outcome: 'no_edits', editor }
+  // Lightroom / Camera Raw develop settings have no faithful open renderer: show the photo.
+  if (editor !== 'darktable') return { path: params.photoPath, outcome: 'not_rendered', editor }
+
+  const out = path.join(path.dirname(params.xmpPath), `xmp-render-${ulid()}.jpg`)
+  const result = await transcodeService.renderXmpWithDarktable(
+    params.photoPath,
+    params.xmpPath,
+    out,
+  )
+  if (result !== 'applied') {
+    logger.warn({ xmpPath: params.xmpPath, result }, 'XMP render fell back to the photo preview')
+    return { path: params.photoPath, outcome: result, editor }
+  }
+  return { path: out, outcome: 'applied', editor }
+}
+
+/**
+ * After a photo is processed, queue a preview for any XMP sidecar of it that is still without
+ * media (it was confirmed before the photo existed). Returns how many were queued.
+ */
+export async function requeueXmpSiblingsActivity(params: { assetId: string }): Promise<number> {
+  const photo = await prisma.asset.findUnique({
+    where: { id: params.assetId },
+    select: { name: true, parentId: true, projectId: true, project: { select: { teamId: true } } },
+  })
+  if (!photo || isXmpSidecar(photo.name) || !photo.projectId) return 0
+
+  const stem = photo.name.slice(
+    0,
+    photo.name.indexOf('.') > 0 ? photo.name.indexOf('.') : undefined,
+  )
+  const xmps = await prisma.asset.findMany({
+    where: {
+      parentId: photo.parentId,
+      projectId: photo.projectId,
+      type: 'file',
+      isDeleted: false,
+      status: AssetStatus.processed,
+      media: { equals: Prisma.AnyNull },
+      name: { startsWith: stem, mode: 'insensitive', endsWith: '.xmp' },
+    },
+    select: { id: true, name: true },
+  })
+
+  let queued = 0
+  for (const xmp of xmps) {
+    if (pickXmpSource(xmp.name, [photo.name]) !== photo.name) continue
+    const pending = await prisma.workflowTask.findFirst({
+      where: {
+        assetId: xmp.id,
+        type: WorkflowTaskType.transcode_image,
+        status: { in: [WorkflowTaskStatus.pending, WorkflowTaskStatus.processing] },
+      },
+      select: { id: true },
+    })
+    if (pending) continue
+    await prisma.workflowTask.create({
+      data: {
+        assetId: xmp.id,
+        teamId: photo.project?.teamId,
+        projectId: photo.projectId,
+        type: WorkflowTaskType.transcode_image,
+        status: WorkflowTaskStatus.pending,
+        payload: { projectId: photo.projectId, transcode: { thumbnail: true } },
+      },
+    })
+    queued++
+  }
+  return queued
 }

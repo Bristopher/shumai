@@ -448,6 +448,54 @@ export class TranscodeService {
     ])
   }
 
+  /**
+   * Render a photo with a darktable XMP sidecar's edits applied, to a JPEG whose long edge is at
+   * most `edge`. Uses `darktable-cli` (override with SHUMAI_DARKTABLE_CLI). Never throws: a
+   * missing binary, a timeout or a failed render are reported so the caller can fall back to the
+   * photo's own preview.
+   */
+  async renderXmpWithDarktable(
+    photoPath: string,
+    xmpPath: string,
+    outputJpeg: string,
+    edge = 3840,
+  ): Promise<'applied' | 'renderer_unavailable' | 'failed'> {
+    const bin = process.env.SHUMAI_DARKTABLE_CLI || 'darktable-cli'
+    // A throwaway config dir per render: darktable otherwise keeps a library and cache in $HOME.
+    const configDir = this.createTempDir('darktable-')
+    try {
+      await execFileAsync(
+        bin,
+        [
+          photoPath,
+          xmpPath,
+          outputJpeg,
+          '--width',
+          String(edge),
+          '--height',
+          String(edge),
+          '--hq',
+          'false',
+          '--apply-custom-presets',
+          'false',
+          '--core',
+          '--configdir',
+          configDir,
+          '--library',
+          ':memory:',
+          '--conf',
+          'write_sidecar_files=never',
+        ],
+        { timeout: 120_000 },
+      )
+      return fs.existsSync(outputJpeg) && fs.statSync(outputJpeg).size > 0 ? 'applied' : 'failed'
+    } catch (err: unknown) {
+      return (err as { code?: unknown })?.code === 'ENOENT' ? 'renderer_unavailable' : 'failed'
+    } finally {
+      this.removeDir(configDir)
+    }
+  }
+
   private async execImageMagickIdentify(
     filePath: string,
   ): Promise<{ width: number; height: number }> {

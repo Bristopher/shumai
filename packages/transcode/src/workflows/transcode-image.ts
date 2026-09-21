@@ -11,6 +11,7 @@ import {
 
 export async function transcodeImageWorkflow(task: WorkflowTask): Promise<void> {
   let tmpDir: string | undefined
+  let sourceTmpDir: string | undefined
   let workerQueue = ''
 
   try {
@@ -24,6 +25,9 @@ export async function transcodeImageWorkflow(task: WorkflowTask): Promise<void> 
       downloadMediaToTmpActivity,
       createEmbeddingTaskIfEnabledActivity,
       createAutofillTaskIfEnabledActivity,
+      resolveXmpSourceActivity,
+      renderXmpPreviewActivity,
+      requeueXmpSiblingsActivity,
     } = getActivities()
 
     await executeActivity(workerQueue, updateAssetStatusActivity, {
@@ -36,8 +40,36 @@ export async function transcodeImageWorkflow(task: WorkflowTask): Promise<void> 
     const download = await executeActivity(workerQueue, downloadMediaToTmpActivity, {
       assetKey: key,
     })
-    const { filePath } = download
+    let { filePath } = download
     tmpDir = download.tmpDir
+
+    // An XMP sidecar previews as the photo it describes, with its edits applied when they can be
+    // rendered (SHUMAI-011). A plain string check keeps workflow code free of extra imports.
+    const isXmp = (asset.name || '').toLowerCase().endsWith('.xmp')
+    if (isXmp) {
+      const source = await executeActivity(workerQueue, resolveXmpSourceActivity, {
+        assetId: asset.id,
+      })
+      if (!source) {
+        // The photo is not uploaded yet. Finish without media; when the photo is processed,
+        // requeueXmpSiblingsActivity queues this sidecar again.
+        await executeActivity(workerQueue, updateAssetStatusActivity, {
+          assetId: asset.id,
+          status: 'processed',
+        })
+        await completeTask(workerQueue, task.id)
+        return
+      }
+      const photo = await executeActivity(workerQueue, downloadMediaToTmpActivity, {
+        assetKey: source.key,
+      })
+      sourceTmpDir = photo.tmpDir
+      const rendered = await executeActivity(workerQueue, renderXmpPreviewActivity, {
+        xmpPath: filePath,
+        photoPath: photo.filePath,
+      })
+      filePath = rendered.path
+    }
 
     const spec = task.payload?.transcode || {}
     const mediaInfo = await executeActivity(workerQueue, getMediaInfoActivity, {
@@ -90,6 +122,10 @@ export async function transcodeImageWorkflow(task: WorkflowTask): Promise<void> 
       status: 'processed',
     })
 
+    if (!isXmp) {
+      await executeActivity(workerQueue, requeueXmpSiblingsActivity, { assetId: asset.id })
+    }
+
     await executeActivity(workerQueue, createEmbeddingTaskIfEnabledActivity, {
       assetId: asset.id,
       teamId: task.teamId,
@@ -109,5 +145,6 @@ export async function transcodeImageWorkflow(task: WorkflowTask): Promise<void> 
     throw err
   } finally {
     await cleanupTmpDir(workerQueue, tmpDir)
+    await cleanupTmpDir(workerQueue, sourceTmpDir)
   }
 }

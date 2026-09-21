@@ -299,5 +299,97 @@ describe.each(['local', 'temporal'] as const)(
       expect(mediaInfo.metadata.originalWidth).toBe(400)
       expect(mediaInfo.metadata.originalHeight).toBe(600)
     }, 50000)
+
+    // XMP sidecars preview as the photo they describe (edits applied when darktable can render
+    // them; this image has no darktable, and the fixture has no edits, so the photo is used).
+    async function seedXmpPair(label: string, withPhoto: boolean) {
+      const bucket = 'shumai-e2e-test-bucket-transcode'
+      const team = await prisma.team.create({ data: { name: `E2E XMP ${label} Team` } })
+      const project = await prisma.project.create({
+        data: { name: `E2E XMP ${label} Project`, teamId: team.id },
+      })
+      const folder = await prisma.asset.create({
+        data: { name: `xmp-${label}`, type: 'folder', status: 'processed', projectId: project.id },
+      })
+      const create = async (name: string, fixture: string, mediaType: string) => {
+        const key = `projects/e2e/xmp-${label}/${name}`
+        const buffer = fs.readFileSync(path.join(fixturesDir, fixture))
+        await s3Service.putObject(bucket, key, buffer, buffer.length, mediaType)
+        const storageKey = await prisma.storageKey.create({ data: { key } })
+        return prisma.asset.create({
+          data: {
+            name,
+            type: 'file',
+            status: 'uploaded',
+            mediaType,
+            projectId: project.id,
+            parentId: folder.id,
+            storageKeyId: storageKey.id,
+          },
+        })
+      }
+      const xmp = await create('small.RAF.xmp', 'small.raf.xmp', 'application/rdf+xml')
+      const photo = withPhoto
+        ? await create('small.RAF', 'small.raf', 'application/octet-stream')
+        : null
+      return { team, project, xmp, photo, create }
+    }
+
+    const runImageTask = async (assetId: string, projectId: string, teamId: string) => {
+      const task = await prisma.workflowTask.create({
+        data: {
+          type: 'transcode_image',
+          status: 'pending',
+          assetId,
+          projectId,
+          teamId,
+          payload: { projectId, transcode: { thumbnail: true } },
+        },
+      })
+      return workflowService.executeWait(task, 45000)
+    }
+
+    it('should preview an XMP sidecar as the photo it describes', async () => {
+      const { team, project, xmp } = await seedXmpPair('paired', true)
+
+      const completed = await runImageTask(xmp.id, project.id, team.id)
+      expect(completed.status).toBe('completed')
+
+      const updated = await prisma.asset.findUnique({ where: { id: xmp.id } })
+      expect(updated?.status).toBe(AssetStatus.processed)
+      const media = updated?.media as unknown as {
+        proxyType: string
+        thumbnail: unknown
+        imageTranscodes: unknown[]
+        metadata: { originalWidth: number; originalHeight: number }
+      }
+      expect(media.proxyType).toBe('image')
+      expect(media.thumbnail).toBeDefined()
+      expect(media.imageTranscodes.length).toBeGreaterThan(0)
+      // The photo's own (oriented) preview size, not anything about the XMP text.
+      expect(media.metadata.originalWidth).toBe(400)
+      expect(media.metadata.originalHeight).toBe(600)
+    }, 50000)
+
+    it('should queue an XMP sidecar again once its late photo is processed', async () => {
+      const { team, project, xmp, create } = await seedXmpPair('late', false)
+
+      // 1. The sidecar arrives first: it finishes without a preview.
+      const first = await runImageTask(xmp.id, project.id, team.id)
+      expect(first.status).toBe('completed')
+      const before = await prisma.asset.findUnique({ where: { id: xmp.id } })
+      expect(before?.status).toBe(AssetStatus.processed)
+      expect(before?.media).toBeNull()
+
+      // 2. The photo arrives and is processed: the sidecar gets a new preview job.
+      const photo = await create('small.RAF', 'small.raf', 'application/octet-stream')
+      const second = await runImageTask(photo.id, project.id, team.id)
+      expect(second.status).toBe('completed')
+
+      const requeued = await prisma.workflowTask.findMany({
+        where: { assetId: xmp.id, type: 'transcode_image' },
+      })
+      expect(requeued.length).toBe(2)
+    }, 90000)
   },
 )

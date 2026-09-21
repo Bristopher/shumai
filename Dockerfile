@@ -59,6 +59,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# darktable-cli renders the edits in darktable XMP sidecars for their previews. Optional: without
+# it, an XMP sidecar previews as its photo unedited (TranscodeService.renderXmpWithDarktable).
+RUN apt-get update && apt-get install -y --no-install-recommends darktable \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 # Set up working directory and make it owned by the bun user
 RUN mkdir -p /app/data && chown -R bun:bun /app
 
