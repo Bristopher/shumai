@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { zValidator } from '@hono/zod-validator'
+import { z } from 'zod'
 import { authzService, Permission, ResourceType } from '@shumai/core/src/authz/authz'
 import { assetService } from '@shumai/core/src/asset/asset'
 import { searchService } from '@shumai/core/src/search/search'
@@ -186,6 +187,25 @@ const route = new Hono<{ Variables: { user: User } }>()
     const result = await searchService.search(folderId, req)
     return c.json(result)
   })
+  .get(
+    '/folders/:folderId/file-types',
+    zValidator('query', z.object({ recursively: z.enum(['true', 'false']).optional() })),
+    async (c) => {
+      const folderId = c.req.param('folderId')
+      const user = c.get('user')
+      const { recursively } = c.req.valid('query')
+
+      await authzService.hasPermission({
+        user,
+        permission: Permission.Read,
+        type: ResourceType.Asset,
+        id: folderId,
+      })
+
+      const counts = await searchService.fileTypeCounts(folderId, recursively === 'true')
+      return c.json({ data: counts })
+    },
+  )
   .get('/folders/:folderId/agentsmd', async (c) => {
     const folderId = c.req.param('folderId')
     const user = c.get('user')
