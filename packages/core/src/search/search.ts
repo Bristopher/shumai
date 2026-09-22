@@ -593,7 +593,7 @@ export class SearchService {
       ORDER BY 3 DESC, 2 ASC
       LIMIT 300
     `)
-    const facets: PhotoFacets = { camera: [], lens: [], filmSimulation: [] }
+    const facets: PhotoFacets = { camera: [], lens: [], filmSimulation: [], fujiRecipe: [] }
     for (const r of rows) {
       const facet = facetByKey.get(r.key)
       if (facet) facets[facet].push({ value: r.value, count: Number(r.count) })

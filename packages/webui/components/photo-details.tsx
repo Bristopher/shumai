@@ -1,9 +1,12 @@
 import { stackKey, type AssetInfo, type StackMember } from '@shumai/dtos'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { Camera } from 'lucide-react'
+import { Camera, Pencil } from 'lucide-react'
+import { useState } from 'react'
 import { client } from '@/ui/api/client'
+import { usePermissions } from '@/ui/hooks/use-permissions'
 import { cn } from '@/ui/lib/utils'
+import { RecipeNameDialog, recipeParts, useFujiRecipeNames } from './photo/recipe-name'
 import { m } from '@/ui/paraglide/messages.js'
 
 interface PhotoDetailsProps {
@@ -37,6 +40,11 @@ export function PhotoDetails({ projectId, file, isPublic }: PhotoDetailsProps) {
   const camera = values.get('camera') as string | undefined
   const lens = values.get('lens') as string | undefined
   const film = values.get('film_simulation') as string | undefined
+  const recipe = values.get('fuji_recipe') as string | undefined
+  const { canEdit } = usePermissions(projectId)
+  const { names } = useFujiRecipeNames(projectId, !isPublic && !!recipe)
+  const [naming, setNaming] = useState<string | null>(null)
+  const recipeName = recipe ? names[recipe] : undefined
   const focal = formatNumber(values.get('focal_length'))
   const aperture = formatNumber(values.get('aperture'))
   const shutter = values.get('shutter_speed') as string | undefined
@@ -62,7 +70,9 @@ export function PhotoDetails({ projectId, file, isPublic }: PhotoDetailsProps) {
   })
   const siblings = members && members.length > 1 ? members : null
 
-  if (!camera && !lens && !film && exposure.length === 0 && !taken && !siblings) return null
+  if (!camera && !lens && !film && !recipe && exposure.length === 0 && !taken && !siblings) {
+    return null
+  }
 
   return (
     <div className="shrink-0 space-y-2 border-b border-border/50 px-3 pb-3 pt-2 text-xs">
@@ -84,6 +94,51 @@ export function PhotoDetails({ projectId, file, isPublic }: PhotoDetailsProps) {
               {taken.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
             </div>
           )}
+        </div>
+      )}
+      {recipe && (
+        <div className="space-y-1" data-testid="photo-details-recipe">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              {m.photo_filter_recipe()}
+            </span>
+            <span
+              className={cn(
+                'min-w-0 flex-1 truncate',
+                recipeName ? 'font-medium text-foreground' : 'italic text-muted-foreground',
+              )}
+            >
+              {recipeName ?? m.recipe_unnamed()}
+            </span>
+            {canEdit && !isPublic && (
+              <button
+                type="button"
+                aria-label={m.recipe_name_title()}
+                title={m.recipe_name_title()}
+                className="text-muted-foreground hover:text-foreground"
+                onClick={() => setNaming(recipe)}
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {recipeParts(recipe)
+              .slice(1)
+              .map((part) => (
+                <span
+                  key={part}
+                  className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground"
+                >
+                  {part}
+                </span>
+              ))}
+          </div>
+          <RecipeNameDialog
+            projectId={projectId}
+            settings={naming}
+            onClose={() => setNaming(null)}
+          />
         </div>
       )}
       {siblings && (

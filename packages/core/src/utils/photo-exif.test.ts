@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   cameraName,
+  describeFujiRecipe,
   exifDateToIso,
   formatShutterSpeed,
   photoExifMetadata,
@@ -14,6 +15,7 @@ type Value =
   | { short: number }
   | { long: number }
   | { rational: [number, number] }
+  | { slong: number[] }
   | { undefined: Buffer }
 
 interface Tag {
@@ -47,6 +49,11 @@ function writeIfd(tags: Tag[], at: number): Buffer {
       count = 1
       bytes = Buffer.alloc(4)
       bytes.writeUInt32LE(value.long)
+    } else if ('slong' in value) {
+      type = 9
+      count = value.slong.length
+      bytes = Buffer.alloc(4 * count)
+      value.slong.forEach((v, j) => bytes.writeInt32LE(v, j * 4))
     } else if ('rational' in value) {
       type = 5
       count = 1
@@ -113,6 +120,27 @@ function raf(jpeg: Buffer): Buffer {
   return Buffer.concat([head, jpeg])
 }
 
+// The MakerNote of a real X100VI shot (DSCF5543), recipe tags only.
+const X100VI_RECIPE: Tag[] = [
+  { tag: 0x1001, value: { short: 0x84 } },
+  { tag: 0x1002, value: { short: 0 } },
+  { tag: 0x1003, value: { short: 0x180 } },
+  { tag: 0x100a, value: { slong: [80, -100] } },
+  { tag: 0x100e, value: { short: 0 } },
+  { tag: 0x100f, value: { slong: [0] } },
+  { tag: 0x1040, value: { slong: [-32] } },
+  { tag: 0x1041, value: { slong: [24] } },
+  { tag: 0x1047, value: { slong: [0] } },
+  { tag: 0x1048, value: { slong: [32] } },
+  { tag: 0x104c, value: { short: 0 } },
+  { tag: 0x104e, value: { slong: [32] } },
+  { tag: 0x1401, value: { short: 0x800 } },
+]
+
+const CLASSIC_NEG_RECIPE =
+  'Classic Neg. | Grain Off | Color Chrome Weak | FX Blue Weak | WB Auto R+4 B-5 | ' +
+  'Highlight -1.5 | Shadow +2 | Color -1 | Sharpness +1 | NR 0 | Clarity 0'
+
 const X100VI_EXIF = tiff(
   [
     { tag: 0x010f, value: { ascii: 'FUJIFILM' } },
@@ -127,7 +155,7 @@ const X100VI_EXIF = tiff(
     { tag: 0x9291, value: { ascii: '16' } },
     { tag: 0x920a, value: { rational: [230, 10] } },
     { tag: 0xa405, value: { short: 35 } },
-    { tag: 0x927c, value: { undefined: fujiNote([{ tag: 0x1401, value: { short: 0x800 } }]) } },
+    { tag: 0x927c, value: { undefined: fujiNote(X100VI_RECIPE) } },
   ],
 )
 
@@ -143,6 +171,7 @@ describe('readPhotoExif', () => {
       focalLength: 23,
       focalLength35: 35,
       filmSimulation: 'Classic Neg.',
+      fujiRecipe: CLASSIC_NEG_RECIPE,
     })
   })
 
@@ -194,6 +223,35 @@ describe('readPhotoExif', () => {
     expect(readPhotoExifFromBuffer(jpegWithExif(t))?.filmSimulation).toBe('Acros Ye')
   })
 
+  it('describes a recipe with Kelvin white balance, strong grain and clarity', () => {
+    expect(
+      describeFujiRecipe(
+        {
+          filmMode: 0x600,
+          saturation: 0xe0,
+          whiteBalance: 0xff0,
+          colorTemperature: 5600,
+          wbShiftRed: 20,
+          wbShiftBlue: -120,
+          highlight: 16,
+          shadow: -8,
+          sharpness: 0x2,
+          noiseReduction: 0x2e0,
+          clarity: -3000,
+          grainRoughness: 64,
+          grainSize: 32,
+          colorChrome: 64,
+          colorChromeBlue: 0,
+        },
+        'Classic Chrome',
+      ),
+    ).toBe(
+      'Classic Chrome | Grain Strong Large | Color Chrome Strong | FX Blue Off | WB 5600K R+1 B-6 | ' +
+        'Highlight -1 | Shadow +0.5 | Color +4 | Sharpness -2 | NR -4 | Clarity -3',
+    )
+    expect(describeFujiRecipe({}, undefined)).toBeUndefined()
+  })
+
   it('returns null for files without EXIF, and for truncated or hostile data', () => {
     expect(readPhotoExifFromBuffer(Buffer.from([0xff, 0xd8, 0xff, 0xd9]))).toBeNull()
     expect(readPhotoExifFromBuffer(Buffer.from('not an image'))).toBeNull()
@@ -232,6 +290,7 @@ describe('photo EXIF helpers', () => {
       { key: 'capture_date', value: '2026-09-06T15:32:57.160Z' },
       { key: 'camera', value: 'FUJIFILM X100VI' },
       { key: 'film_simulation', value: 'Classic Neg.' },
+      { key: 'fuji_recipe', value: CLASSIC_NEG_RECIPE },
       { key: 'focal_length', value: 23 },
       { key: 'aperture', value: 5.6 },
       { key: 'shutter_speed', value: '1/250' },

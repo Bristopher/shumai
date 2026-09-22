@@ -224,6 +224,12 @@ export const systemFields: Prisma.MetadataFieldCreateInput[] = [
     config: { name: 'Film Simulation', type: 'text', text: {} },
   },
   {
+    key: 'fuji_recipe',
+    scope: 'SYSTEM',
+    readOnly: true,
+    config: { name: 'Fuji Recipe Settings', type: 'text', text: {} },
+  },
+  {
     key: 'focal_length',
     scope: 'SYSTEM',
     readOnly: true,

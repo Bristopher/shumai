@@ -1473,5 +1473,12 @@
   "date_group_undated": "No date taken",
   "stack_delete_title": "Delete stacked files?",
   "stack_delete_warning": "These cards are stacks: deleting one deletes all {count} files listed below, not just the one shown. Untick any file you want to keep.",
-  "stack_delete_confirm": "Delete {count} files"
+  "stack_delete_confirm": "Delete {count} files",
+  "photo_filter_recipe": "Recipe",
+  "recipe_unnamed": "Unnamed recipe",
+  "recipe_name_title": "Name this recipe",
+  "recipe_name_hint": "The camera records these settings but not a recipe name. The name you give applies to every photo shot with exactly these settings, for your whole team.",
+  "recipe_name_placeholder": "e.g. Reggie's Portra",
+  "recipe_name_suggestions": "Same recipe apart from clarity:",
+  "recipe_name_remove": "Remove name"
 }

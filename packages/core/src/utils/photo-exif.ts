@@ -29,6 +29,11 @@ export interface PhotoExif {
   focalLength35?: number
   /** Fujifilm film simulation, e.g. "Classic Chrome" or "Acros Ye". */
   filmSimulation?: string
+  /**
+   * The Fujifilm recipe: every in-camera look setting as one readable string (see
+   * `describeFujiRecipe`). Photos taken with the same recipe share it exactly.
+   */
+  fujiRecipe?: string
 }
 
 const MAX_IFD_ENTRIES = 512
@@ -50,7 +55,21 @@ const TAG_SUBSEC_ORIGINAL = 0x9291
 const TAG_FOCAL_LENGTH_35 = 0xa405
 const TAG_LENS_MODEL = 0xa434
 
+const FUJI_SHARPNESS = 0x1001
+const FUJI_WHITE_BALANCE = 0x1002
 const FUJI_SATURATION = 0x1003
+const FUJI_COLOR_TEMPERATURE = 0x1005
+const FUJI_WB_FINE_TUNE = 0x100a
+const FUJI_NOISE_REDUCTION = 0x100e
+const FUJI_CLARITY = 0x100f
+const FUJI_SHADOW_TONE = 0x1040
+const FUJI_HIGHLIGHT_TONE = 0x1041
+const FUJI_GRAIN_ROUGHNESS = 0x1047
+const FUJI_COLOR_CHROME = 0x1048
+const FUJI_BW_WARM_COOL = 0x1049
+const FUJI_BW_MAGENTA_GREEN = 0x104b
+const FUJI_GRAIN_SIZE = 0x104c
+const FUJI_COLOR_CHROME_BLUE = 0x104e
 const FUJI_FILM_MODE = 0x1401
 
 const TYPE_SIZE = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 4]
@@ -105,10 +124,10 @@ function readString(t: Tiff, e: Entry | undefined): string | undefined {
   return s || undefined
 }
 
-function readNumber(t: Tiff, e: Entry | undefined): number | undefined {
-  if (!e) return undefined
+function readNumber(t: Tiff, e: Entry | undefined, index = 0): number | undefined {
+  if (!e || index >= e.count) return undefined
   const size = TYPE_SIZE[e.type] ?? 0
-  const b = t.src.read(e.valueOffset, size)
+  const b = t.src.read(e.valueOffset + index * size, size)
   if (!b) return undefined
   const u16 = (o: number) => (t.be ? b.readUInt16BE(o) : b.readUInt16LE(o))
   const u32 = (o: number) => (t.be ? b.readUInt32BE(o) : b.readUInt32LE(o))
@@ -120,6 +139,10 @@ function readNumber(t: Tiff, e: Entry | undefined): number | undefined {
       return u16(0)
     case 4:
       return u32(0)
+    case 8:
+      return t.be ? b.readInt16BE(0) : b.readInt16LE(0)
+    case 9:
+      return s32(0)
     case 5: {
       const d = u32(4)
       return d === 0 ? undefined : u32(0) / d
@@ -194,16 +217,166 @@ const FUJI_MONOCHROME: Record<number, string> = {
   0x503: 'Acros G',
 }
 
-function readFujiFilmSimulation(src: ByteSource, note: Entry): string | undefined {
+/** The raw Fujifilm MakerNote values that make up a recipe. */
+export interface FujiRecipeSettings {
+  filmMode?: number
+  saturation?: number
+  whiteBalance?: number
+  colorTemperature?: number
+  wbShiftRed?: number
+  wbShiftBlue?: number
+  highlight?: number
+  shadow?: number
+  sharpness?: number
+  noiseReduction?: number
+  clarity?: number
+  grainRoughness?: number
+  grainSize?: number
+  colorChrome?: number
+  colorChromeBlue?: number
+  bwWarmCool?: number
+  bwMagentaGreen?: number
+}
+
+function readFujiMakerNote(
+  src: ByteSource,
+  note: Entry,
+): { filmSimulation?: string; settings: FujiRecipeSettings } | undefined {
   // "FUJIFILM" + little-endian offset of the IFD, both relative to the start of the note.
   const head = src.read(note.valueOffset, 12)
   if (!head || head.toString('latin1', 0, 8) !== 'FUJIFILM') return undefined
   const t: Tiff = { src, base: note.valueOffset, be: false }
   const entries = readIfd(t, note.valueOffset + head.readUInt32LE(8))
-  const saturation = readNumber(t, find(entries, FUJI_SATURATION))
-  if (saturation !== undefined && FUJI_MONOCHROME[saturation]) return FUJI_MONOCHROME[saturation]
-  const mode = readNumber(t, find(entries, FUJI_FILM_MODE))
-  return mode === undefined ? undefined : FUJI_FILM_MODES[mode]
+  const get = (tag: number, index = 0) => readNumber(t, find(entries, tag), index)
+  const settings: FujiRecipeSettings = {
+    filmMode: get(FUJI_FILM_MODE),
+    saturation: get(FUJI_SATURATION),
+    whiteBalance: get(FUJI_WHITE_BALANCE),
+    colorTemperature: get(FUJI_COLOR_TEMPERATURE),
+    wbShiftRed: get(FUJI_WB_FINE_TUNE, 0),
+    wbShiftBlue: get(FUJI_WB_FINE_TUNE, 1),
+    highlight: get(FUJI_HIGHLIGHT_TONE),
+    shadow: get(FUJI_SHADOW_TONE),
+    sharpness: get(FUJI_SHARPNESS),
+    noiseReduction: get(FUJI_NOISE_REDUCTION),
+    clarity: get(FUJI_CLARITY),
+    grainRoughness: get(FUJI_GRAIN_ROUGHNESS),
+    grainSize: get(FUJI_GRAIN_SIZE),
+    colorChrome: get(FUJI_COLOR_CHROME),
+    colorChromeBlue: get(FUJI_COLOR_CHROME_BLUE),
+    bwWarmCool: get(FUJI_BW_WARM_COOL),
+    bwMagentaGreen: get(FUJI_BW_MAGENTA_GREEN),
+  }
+  const mono = settings.saturation !== undefined ? FUJI_MONOCHROME[settings.saturation] : undefined
+  const filmSimulation =
+    mono ?? (settings.filmMode === undefined ? undefined : FUJI_FILM_MODES[settings.filmMode])
+  return { filmSimulation, settings }
+}
+
+// Value tables from ExifTool's FujiFilm tags; the tone curves and clarity are linear.
+const FUJI_SHARPNESS_STEPS: Record<number, string> = {
+  0x0: '-4',
+  0x1: '-3',
+  0x2: '-2',
+  0x82: '-1',
+  0x3: '0',
+  0x84: '+1',
+  0x4: '+2',
+  0x5: '+3',
+  0x6: '+4',
+}
+const FUJI_COLOR_STEPS: Record<number, string> = {
+  0x4e0: '-4',
+  0x4c0: '-3',
+  0x400: '-2',
+  0x180: '-1',
+  0x0: '0',
+  0x80: '+1',
+  0x100: '+2',
+  0xc0: '+3',
+  0xe0: '+4',
+}
+const FUJI_NR_STEPS: Record<number, string> = {
+  0x2e0: '-4',
+  0x2c0: '-3',
+  0x200: '-2',
+  0x280: '-1',
+  0x0: '0',
+  0x180: '+1',
+  0x100: '+2',
+  0x1c0: '+3',
+  0x1e0: '+4',
+}
+const FUJI_WB_MODES: Record<number, string> = {
+  0x0: 'Auto',
+  0x1: 'Auto White Priority',
+  0x2: 'Auto Ambience Priority',
+  0x100: 'Daylight',
+  0x200: 'Cloudy',
+  0x300: 'Fluorescent 1',
+  0x301: 'Fluorescent 2',
+  0x302: 'Fluorescent 3',
+  0x400: 'Incandescent',
+  0x500: 'Flash',
+  0x600: 'Underwater',
+}
+const FUJI_STRENGTH: Record<number, string> = { 0: 'Off', 32: 'Weak', 64: 'Strong' }
+const FUJI_GRAIN_SIZES: Record<number, string> = { 0: '', 16: ' Small', 32: ' Large' }
+
+const signed = (n: number) => (n > 0 ? `+${n}` : String(n))
+
+/**
+ * One readable line for a Fujifilm recipe, stable for identical settings, e.g.
+ * "Classic Neg. | Grain Off | Color Chrome Weak | FX Blue Weak | WB Auto R+4 B-5 |
+ * Highlight -1.5 | Shadow +2 | Color -1 | Sharpness +1 | NR 0 | Clarity 0".
+ * Dynamic range and exposure are left out: they change shot to shot within one recipe.
+ * Returns undefined when the film simulation is unknown.
+ */
+export function describeFujiRecipe(
+  s: FujiRecipeSettings,
+  filmSimulation: string | undefined,
+): string | undefined {
+  if (!filmSimulation) return undefined
+  const parts = [filmSimulation]
+  if (s.grainRoughness !== undefined) {
+    const rough = FUJI_STRENGTH[s.grainRoughness] ?? String(s.grainRoughness)
+    parts.push(`Grain ${rough}${rough === 'Off' ? '' : (FUJI_GRAIN_SIZES[s.grainSize ?? 0] ?? '')}`)
+  }
+  if (s.colorChrome !== undefined) {
+    parts.push(`Color Chrome ${FUJI_STRENGTH[s.colorChrome] ?? s.colorChrome}`)
+  }
+  if (s.colorChromeBlue !== undefined) {
+    parts.push(`FX Blue ${FUJI_STRENGTH[s.colorChromeBlue] ?? s.colorChromeBlue}`)
+  }
+  if (s.whiteBalance !== undefined) {
+    const mode =
+      s.whiteBalance === 0xff0
+        ? `${s.colorTemperature ?? '?'}K`
+        : (FUJI_WB_MODES[s.whiteBalance] ?? `Custom ${s.whiteBalance.toString(16)}`)
+    // Newer bodies store the shift in 1/20 steps.
+    const r = Math.round((s.wbShiftRed ?? 0) / 20)
+    const b = Math.round((s.wbShiftBlue ?? 0) / 20)
+    parts.push(`WB ${mode} R${signed(r)} B${signed(b)}`)
+  }
+  // Tone curves: raw -16 per +1 step, in half steps on newer bodies.
+  if (s.highlight !== undefined) parts.push(`Highlight ${signed(-s.highlight / 16)}`)
+  if (s.shadow !== undefined) parts.push(`Shadow ${signed(-s.shadow / 16)}`)
+  const mono = s.saturation !== undefined && FUJI_MONOCHROME[s.saturation] !== undefined
+  if (mono) {
+    if (s.bwWarmCool !== undefined || s.bwMagentaGreen !== undefined) {
+      parts.push(`Mono WC ${signed(s.bwWarmCool ?? 0)} MG ${signed(s.bwMagentaGreen ?? 0)}`)
+    }
+  } else if (s.saturation !== undefined) {
+    parts.push(`Color ${FUJI_COLOR_STEPS[s.saturation] ?? `0x${s.saturation.toString(16)}`}`)
+  }
+  if (s.sharpness !== undefined && FUJI_SHARPNESS_STEPS[s.sharpness] !== undefined) {
+    parts.push(`Sharpness ${FUJI_SHARPNESS_STEPS[s.sharpness]}`)
+  }
+  if (s.noiseReduction !== undefined && FUJI_NR_STEPS[s.noiseReduction] !== undefined) {
+    parts.push(`NR ${FUJI_NR_STEPS[s.noiseReduction]}`)
+  }
+  if (s.clarity !== undefined) parts.push(`Clarity ${signed(Math.round(s.clarity / 1000))}`)
+  return parts.join(' | ')
 }
 
 /** "2026:09:20 14:03:22" (+ sub-seconds, + "-07:00") to an ISO string. */
@@ -259,7 +432,9 @@ function readTiffExif(src: ByteSource, base: number): PhotoExif | null {
     out.lensModel = readString(t, find(exif, TAG_LENS_MODEL))
     const note = find(exif, TAG_MAKER_NOTE)
     if (note && /fujifilm/i.test(out.make ?? '')) {
-      out.filmSimulation = readFujiFilmSimulation(src, note)
+      const fuji = readFujiMakerNote(src, note)
+      out.filmSimulation = fuji?.filmSimulation
+      out.fujiRecipe = fuji && describeFujiRecipe(fuji.settings, fuji.filmSimulation)
     }
   } else {
     out.capturedAt = exifDateToIso(dateTime)
@@ -335,6 +510,7 @@ export function photoExifMetadata(
   if (camera) updates.push({ key: 'camera', value: camera })
   if (exif.lensModel) updates.push({ key: 'lens', value: exif.lensModel })
   if (exif.filmSimulation) updates.push({ key: 'film_simulation', value: exif.filmSimulation })
+  if (exif.fujiRecipe) updates.push({ key: 'fuji_recipe', value: exif.fujiRecipe })
   if (exif.focalLength) updates.push({ key: 'focal_length', value: exif.focalLength })
   if (exif.fNumber) updates.push({ key: 'aperture', value: exif.fNumber })
   const shutter = formatShutterSpeed(exif.exposureTime)
@@ -349,6 +525,7 @@ export const PHOTO_EXIF_FIELD_KEYS = [
   'camera',
   'lens',
   'film_simulation',
+  'fuji_recipe',
   'focal_length',
   'aperture',
   'shutter_speed',

@@ -7,11 +7,13 @@ import {
   createFieldRequestSchema,
   updateFieldRequestSchema,
   updateProjectFieldsOrderRequestSchema,
+  setFujiRecipeNameRequestSchema,
   FieldInfo,
   AuditAction,
 } from '@shumai/dtos'
 import type { Prisma } from '@shumai/db'
 import { auditLogService } from '@shumai/core/src/auditLog/auditLog'
+import { fujiRecipeNameService } from '@shumai/core/src/photo/fuji-recipe-names'
 
 type User = Prisma.UserGetPayload<Record<string, never>>
 
@@ -31,6 +33,31 @@ function toFieldInfo(
 }
 
 const route = new Hono<{ Variables: { user: User } }>()
+  .get('/projects/:projectId/fuji-recipe-names', async (c) => {
+    const projectId = c.req.param('projectId')
+    await authzService.hasPermission({
+      user: c.get('user'),
+      permission: Permission.Read,
+      type: ResourceType.Project,
+      id: projectId,
+    })
+    return c.json({ data: await fujiRecipeNameService.list(projectId) })
+  })
+  .put(
+    '/projects/:projectId/fuji-recipe-names',
+    zValidator('json', setFujiRecipeNameRequestSchema),
+    async (c) => {
+      const projectId = c.req.param('projectId')
+      const { settings, name } = c.req.valid('json')
+      await authzService.hasPermission({
+        user: c.get('user'),
+        permission: Permission.Edit,
+        type: ResourceType.Project,
+        id: projectId,
+      })
+      return c.json({ data: await fujiRecipeNameService.set(projectId, settings, name) })
+    },
+  )
   .post('/teams/:teamId/fields', zValidator('json', createFieldRequestSchema), async (c) => {
     const teamId = c.req.param('teamId')
     const req = c.req.valid('json')
