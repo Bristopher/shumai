@@ -1,13 +1,25 @@
 import { prisma } from '@shumai/db'
 import { Prisma, AssetType, WorkflowTaskType } from '@shumai/db'
 import { AssetService, assetService } from '@shumai/core/src/asset/asset'
-import { AssetInfo, type FileTypeCount } from '@shumai/dtos'
+import {
+  AssetInfo,
+  PHOTO_FACETS,
+  stackKey,
+  type FileTypeCount,
+  type PhotoFacet,
+  type PhotoFacets,
+} from '@shumai/dtos'
 import { SearchRequest } from '@shumai/dtos'
 import { PaginatedData, decodeCursor, encodeCursor, PageInfo } from '@shumai/core/src/pagination'
 import { generateSearchNgrams } from '@shumai/core/src/utils/ngram'
 import { workflowService } from '@shumai/workflow-core'
 import { HTTPException } from 'hono/http-exception'
-import { SqlQueryBuilder } from './sql-query-builder'
+import {
+  CAPTURE_DATE_SQL,
+  STACK_KEY_SQL,
+  STACK_RANK_SQL,
+  SqlQueryBuilder,
+} from './sql-query-builder'
 
 export class SearchService {
   constructor(
@@ -91,7 +103,9 @@ export class SearchService {
         builder.addSearchConditions(req.operator, req.conditions, { skipNameContains: true })
       }
 
-      if (req.assetType !== 'folder') builder.addFileTypeFilter(req.fileTypes)
+      if (req.assetType !== 'folder') {
+        builder.addFileTypeFilter(req.fileTypes).addPhotoFilter(req.photo)
+      }
 
       const nameCond = req.conditions?.find((c) => c.field === 'name' && c.operator === 'contains')
       if (nameCond) {
@@ -176,7 +190,9 @@ export class SearchService {
         countBuilder.addSearchConditions(req.operator, req.conditions, { skipNameContains: true })
       }
 
-      if (req.assetType !== 'folder') countBuilder.addFileTypeFilter(req.fileTypes)
+      if (req.assetType !== 'folder') {
+        countBuilder.addFileTypeFilter(req.fileTypes).addPhotoFilter(req.photo)
+      }
 
       if (nameCond) {
         const valStr = String(nameCond.value)
@@ -213,6 +229,7 @@ export class SearchService {
     // ----------------------------------------------------------------------
     // Non-semantic search (using SqlQueryBuilder)
     // ----------------------------------------------------------------------
+    const stacked = !!req.stack && req.assetType !== 'folder'
     const builder = new SqlQueryBuilder()
       .select(Prisma.sql`a.id as "assetId"`)
       .from(Prisma.sql`assets a`)
@@ -234,7 +251,14 @@ export class SearchService {
       builder.addSearchConditions(req.operator, req.conditions, { skipNameContains: true })
     }
 
-    if (req.assetType !== 'folder') builder.addFileTypeFilter(req.fileTypes)
+    if (req.assetType !== 'folder') {
+      builder.addFileTypeFilter(req.fileTypes).addPhotoFilter(req.photo).stackByBaseName(stacked)
+    }
+    if (stacked) {
+      builder.select(
+        Prisma.sql`a.id as "assetId", a.stack_count as "stackCount", a.parent_id as "parentId", ${STACK_KEY_SQL} as "stackKey"`,
+      )
+    }
 
     // name contains n-grams / Switching Search Optimization
     let countOverride: number | undefined
@@ -273,7 +297,12 @@ export class SearchService {
           probeBuilder.addSearchConditions(req.operator, req.conditions, { skipNameContains: true })
         }
 
-        if (req.assetType !== 'folder') probeBuilder.addFileTypeFilter(req.fileTypes)
+        if (req.assetType !== 'folder') {
+          probeBuilder
+            .addFileTypeFilter(req.fileTypes)
+            .addPhotoFilter(req.photo)
+            .stackByBaseName(stacked)
+        }
 
         probeBuilder.addWhere(Prisma.sql`a.name_ngram @> ${ngrams}::text[]`)
         probeBuilder.addWhere(Prisma.sql`a.name ILIKE ${'%' + valStr + '%'}`)
@@ -314,6 +343,9 @@ export class SearchService {
         orderSql = Prisma.sql`a.created_at ${direction}`
       } else if (req.sort.field === 'size_byte' || req.sort.field === 'sizeByte') {
         orderSql = Prisma.sql`a.size_byte ${direction}`
+      } else if (req.sort.field === 'captureDate' || req.sort.field === 'capture_date') {
+        // Files without a date taken go last; ties keep a stable order for offset pagination.
+        orderSql = Prisma.sql`${CAPTURE_DATE_SQL} ${direction} NULLS LAST, a.name ${direction}, a.id ASC`
       } else {
         orderSql = Prisma.sql`a.id DESC`
       }
@@ -335,7 +367,10 @@ export class SearchService {
 
     // Execute raw SQL query
     const query = builder.build()
-    const matches = await this.prismaClient.$queryRaw<{ assetId: string }[]>(query)
+    const matches =
+      await this.prismaClient.$queryRaw<
+        { assetId: string; stackCount?: bigint; parentId?: string | null; stackKey?: string }[]
+      >(query)
 
     const hasNextPage = matches.length > limit
     const finalMatches = hasNextPage ? matches.slice(0, limit) : matches
@@ -348,11 +383,14 @@ export class SearchService {
       assetInfosMap.set(info.id, info)
     }
 
+    const stacks = stacked ? await this.loadStackMembers(finalMatches, req) : new Map()
+
     const data: AssetInfo[] = []
     for (const match of finalMatches) {
       const baseInfo = assetInfosMap.get(match.assetId)
       if (baseInfo) {
-        data.push(baseInfo)
+        const members = stacks.get(match.assetId)
+        data.push(members ? { ...baseInfo, stack: { count: members.length, members } } : baseInfo)
       }
     }
 
@@ -380,7 +418,12 @@ export class SearchService {
         countBuilder.addSearchConditions(req.operator, req.conditions, { skipNameContains: true })
       }
 
-      if (req.assetType !== 'folder') countBuilder.addFileTypeFilter(req.fileTypes)
+      if (req.assetType !== 'folder') {
+        countBuilder
+          .addFileTypeFilter(req.fileTypes)
+          .addPhotoFilter(req.photo)
+          .stackByBaseName(stacked)
+      }
 
       if (nameCond) {
         countBuilder.addWhere(Prisma.sql`a.name ILIKE ${'%' + valStr + '%'}`)
@@ -391,7 +434,11 @@ export class SearchService {
       pageInfo.total = totalCount
 
       if (totalCount < 2000) {
-        countBuilder.select(Prisma.sql`SUM(COALESCE(a.size_byte, 0))::bigint as sum`)
+        countBuilder.select(
+          stacked
+            ? Prisma.sql`SUM(a.stack_size)::bigint as sum`
+            : Prisma.sql`SUM(COALESCE(a.size_byte, 0))::bigint as sum`,
+        )
         const sumRes = await this.prismaClient.$queryRaw<{ sum: bigint | null }[]>(
           countBuilder.build(),
         )
@@ -403,7 +450,11 @@ export class SearchService {
       pageInfo.total = totalCount
       if (totalCount < 2000) {
         const countBuilder = new SqlQueryBuilder()
-          .select(Prisma.sql`SUM(COALESCE(a.size_byte, 0))::bigint as sum`)
+          .select(
+            stacked
+              ? Prisma.sql`SUM(a.stack_size)::bigint as sum`
+              : Prisma.sql`SUM(COALESCE(a.size_byte, 0))::bigint as sum`,
+          )
           .from(Prisma.sql`assets a`)
           .addWhere(Prisma.sql`a.is_deleted = false`)
 
@@ -423,7 +474,12 @@ export class SearchService {
           countBuilder.addSearchConditions(req.operator, req.conditions, { skipNameContains: true })
         }
 
-        if (req.assetType !== 'folder') countBuilder.addFileTypeFilter(req.fileTypes)
+        if (req.assetType !== 'folder') {
+          countBuilder
+            .addFileTypeFilter(req.fileTypes)
+            .addPhotoFilter(req.photo)
+            .stackByBaseName(stacked)
+        }
 
         if (nameCond) {
           countBuilder.addWhere(Prisma.sql`a.name ILIKE ${'%' + valStr + '%'}`)
@@ -443,6 +499,106 @@ export class SearchService {
     }
 
     return { data, pageInfo }
+  }
+
+  /**
+   * The files of each stacked row that has more than one, keyed by the shown file's id. Members
+   * pass the same file-type and camera filters as the listing, so a hidden sidecar stays hidden.
+   */
+  private async loadStackMembers(
+    rows: { assetId: string; stackCount?: bigint; parentId?: string | null; stackKey?: string }[],
+    req: SearchRequest,
+  ): Promise<Map<string, { id: string; name: string }[]>> {
+    const multi = rows.filter((r) => Number(r.stackCount ?? 1) > 1 && r.parentId && r.stackKey)
+    const out = new Map<string, { id: string; name: string }[]>()
+    if (multi.length === 0) return out
+
+    const types = [AssetType.file, AssetType.version_stack]
+    const builder = new SqlQueryBuilder()
+      .select(Prisma.sql`a.id, a.name, a.parent_id as "parentId", ${STACK_KEY_SQL} as "stackKey"`)
+      .from(Prisma.sql`assets a`)
+      .addWhere(Prisma.sql`a.is_deleted = false`)
+      .addWhere(Prisma.sql`a.type = ANY(${types}::"AssetType"[])`)
+      .addWhere(Prisma.sql`a.parent_id = ANY(${multi.map((r) => r.parentId!)})`)
+      .addWhere(Prisma.sql`${STACK_KEY_SQL} = ANY(${multi.map((r) => r.stackKey!)}::text[])`)
+      .addFileTypeFilter(req.fileTypes)
+      .addPhotoFilter(req.photo)
+      .orderBy(Prisma.sql`${STACK_RANK_SQL}, a.name ASC, a.id ASC`)
+    const members = await this.prismaClient.$queryRaw<
+      { id: string; name: string; parentId: string; stackKey: string }[]
+    >(builder.build())
+
+    const byGroup = new Map<string, { id: string; name: string }[]>()
+    for (const m of members) {
+      const group = `${m.parentId}/${m.stackKey}`
+      const list = byGroup.get(group) ?? []
+      list.push({ id: m.id, name: m.name })
+      byGroup.set(group, list)
+    }
+    for (const r of multi) {
+      const list = byGroup.get(`${r.parentId}/${r.stackKey}`)
+      if (list && list.length > 1) out.set(r.assetId, list)
+    }
+    return out
+  }
+
+  /**
+   * The files that share `assetId`'s folder and base name (its shot: DSCF5543.JPG, .RAF,
+   * .RAF.xmp), itself included, in display order. Empty when the asset does not exist.
+   */
+  async stackMembersOf(assetId: string): Promise<{ id: string; name: string }[]> {
+    const asset = await this.prismaClient.asset.findUnique({
+      where: { id: assetId },
+      select: { parentId: true, name: true },
+    })
+    if (!asset?.parentId) return []
+    const types = [AssetType.file, AssetType.version_stack]
+    const builder = new SqlQueryBuilder()
+      .select(Prisma.sql`a.id, a.name`)
+      .from(Prisma.sql`assets a`)
+      .addWhere(Prisma.sql`a.is_deleted = false`)
+      .addWhere(Prisma.sql`a.type = ANY(${types}::"AssetType"[])`)
+      .addWhere(Prisma.sql`a.parent_id = ${asset.parentId}`)
+      .addWhere(Prisma.sql`${STACK_KEY_SQL} = ${stackKey(asset.name)}`)
+      .orderBy(Prisma.sql`${STACK_RANK_SQL}, a.name ASC, a.id ASC`)
+      .limit(50)
+    return this.prismaClient.$queryRaw<{ id: string; name: string }[]>(builder.build())
+  }
+
+  /**
+   * The camera, lens and film simulation values in a folder, with how many shots (files stacked
+   * by base name) carry each, most common first. Feeds the camera filter's choices.
+   */
+  async photoFacets(folderId: string, recursively = false): Promise<PhotoFacets> {
+    const folderIds = recursively
+      ? await this.assetSvc.getDescendantFolderIds(folderId)
+      : [folderId]
+    const types = [AssetType.file, AssetType.version_stack]
+    const facetByKey = new Map<string, PhotoFacet>(
+      (Object.entries(PHOTO_FACETS) as [PhotoFacet, string][]).map(([facet, key]) => [key, facet]),
+    )
+    const rows = await this.prismaClient.$queryRaw<
+      Array<{ key: string; value: string; count: bigint }>
+    >(Prisma.sql`
+      SELECT v.field_key AS key, v.string_value AS value,
+        count(DISTINCT (a.parent_id, ${STACK_KEY_SQL})) AS count
+      FROM asset_metadata_values v
+      JOIN assets a ON a.id = v.asset_id
+      WHERE a.is_deleted = false
+        AND a.parent_id = ANY(${folderIds})
+        AND a.type = ANY(${types}::"AssetType"[])
+        AND v.field_key = ANY(${[...facetByKey.keys()]}::text[])
+        AND v.string_value IS NOT NULL
+      GROUP BY 1, 2
+      ORDER BY 3 DESC, 2 ASC
+      LIMIT 300
+    `)
+    const facets: PhotoFacets = { camera: [], lens: [], filmSimulation: [] }
+    for (const r of rows) {
+      const facet = facetByKey.get(r.key)
+      if (facet) facets[facet].push({ value: r.value, count: Number(r.count) })
+    }
+    return facets
   }
 
   /**

@@ -15,6 +15,7 @@ import { FilterPanel } from '../search/filter-panel'
 import { SearchFilterDialog } from '../search/search-filter-dialog'
 import { SortControl } from '../search/sort-control'
 import { FileTypeFilter } from '../search/file-type-filter'
+import { PhotoFilter, StackToggle } from '../search/photo-filter'
 import { Avatar, AvatarFallback, AvatarImage } from '../ui/avatar'
 import { Button } from '../ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover'
@@ -280,6 +281,19 @@ export function FileBrowserToolbar({
           teamId={teamId}
           projectId={projectId}
           folderId={assetId}
+          disabled={isRecentlyDeleted || isRecents}
+        />
+
+        <PhotoFilter
+          teamId={teamId}
+          projectId={projectId}
+          folderId={assetId}
+          disabled={isRecentlyDeleted || isRecents}
+        />
+
+        <StackToggle
+          teamId={teamId}
+          projectId={projectId}
           disabled={isRecentlyDeleted || isRecents}
         />
 

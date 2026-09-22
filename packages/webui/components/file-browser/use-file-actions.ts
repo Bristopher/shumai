@@ -1,6 +1,7 @@
 'use client'
 
 import { client } from '@/ui/api/client'
+import { expandStackIds } from '@/ui/lib/stack-utils'
 import type { AssetInfo } from '@shumai/dtos'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { InferRequestType, InferResponseType } from 'hono/client'
@@ -141,9 +142,9 @@ export function useFileActions({
   }
 
   const confirmDelete = () => {
-    const fileIds = itemsToDelete
-      .filter((i) => i.type === 'file' || i.type === 'version_stack')
-      .map((i) => i.id!)
+    const fileIds = expandStackIds(
+      itemsToDelete.filter((i) => i.type === 'file' || i.type === 'version_stack'),
+    )
     const folderIds = itemsToDelete.filter((i) => i.type === 'folder').map((i) => i.id!)
 
     if (fileIds.length > 0) {
@@ -248,7 +249,7 @@ export function useFileActions({
         setResolvedFiles(links)
       } else {
         const res = await getDownloadLinks({
-          json: { ids: items.map((i) => i.id!) },
+          json: { ids: expandStackIds(items) },
         })
         setResolvedFiles(res.files)
       }
@@ -265,7 +266,7 @@ export function useFileActions({
     if (items.length === 0) return
     try {
       const res = await getDownloadLinks({
-        json: { ids: items.map((i) => i.id!) },
+        json: { ids: expandStackIds(items) },
       })
       const files = res.files
       if (files.length === 0) return

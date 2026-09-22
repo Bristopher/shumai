@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { paginationPageInfoSchema, paginationParamsSchema } from './pagination'
+import { assetStackSchema } from './photo'
 
 /**
  * Number of days a soft-deleted asset is kept before it is permanently purged.
@@ -90,6 +91,8 @@ export const assetInfoSchema = z.object({
   endTime: z.number().optional().nullable(),
   hasAgentsMd: z.boolean().optional(),
   commentsCount: z.number().optional(),
+  /** Set by a stacked search when other files share this file's base name. */
+  stack: assetStackSchema.optional(),
 
   media: z
     .object({

@@ -1456,5 +1456,19 @@
   "file_type_group_editing": "编辑文件",
   "file_type_in_this_folder": "此文件夹中",
   "file_type_no_extension": "无扩展名",
-  "file_type_clear": "清除"
+  "file_type_clear": "清除",
+  "sort_date_taken": "拍摄日期",
+  "photo_filter": "相机",
+  "photo_filter_title": "按相机、镜头或胶片模拟筛选",
+  "photo_filter_camera": "相机",
+  "photo_filter_lens": "镜头",
+  "photo_filter_film_simulation": "胶片模拟",
+  "photo_filter_empty": "此文件夹中还没有相机信息。",
+  "stack_toggle": "堆叠",
+  "stack_toggle_on_hint": "同一张照片的文件（JPG、RAW、XMP）显示为一张卡片。点击以显示所有文件。",
+  "stack_toggle_off_hint": "将同一张照片的文件（JPG、RAW、XMP）显示为一张卡片",
+  "stack_files": "{count} 个文件",
+  "stack_versions_label": "此照片的文件",
+  "photo_info_title": "相机",
+  "date_group_undated": "无拍摄日期"
 }

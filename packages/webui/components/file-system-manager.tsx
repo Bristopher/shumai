@@ -10,7 +10,9 @@ import type {
 } from '@shumai/dtos'
 import { type FieldInfo as MetadataFieldInfo } from '@shumai/dtos'
 import { isFileTypeFilterActive, type FileTypeFilter as FileTypeFilterValue } from '@shumai/dtos'
+import { isPhotoFilterActive, type PhotoFilter as PhotoFilterValue } from '@shumai/dtos'
 import { fileTypeMetadataKey } from './search/file-type-filter'
+import { photoFilterMetadataKey, stackMetadataKey } from './search/photo-filter'
 import { useMutation } from '@tanstack/react-query'
 import { InferRequestType, InferResponseType } from 'hono/client'
 
@@ -135,6 +137,10 @@ export default function FileSystemManager({
   // filterConditions, does not switch the browser into a flat recursive search.
   const fileTypes = metadata[fileTypeMetadataKey(projectId)] as FileTypeFilterValue | undefined
   const activeFileTypes = isFileTypeFilterActive(fileTypes) ? fileTypes : undefined
+  const photoFilter = metadata[photoFilterMetadataKey(projectId)] as PhotoFilterValue | undefined
+  const activePhotoFilter = isPhotoFilterActive(photoFilter) ? photoFilter : undefined
+  // Stacking shows one card per shot; recents and trash list files individually.
+  const stack = metadata[stackMetadataKey(projectId)] === true
 
   const isCollection = !!collection
   const isFiltering = filterConditions.length > 0 || isCollection
@@ -276,6 +282,8 @@ export default function FileSystemManager({
             sort,
             isCollection,
             activeFileTypes,
+            activePhotoFilter,
+            stack,
           ],
     queryFn: async ({ pageParam }) => {
       if (isRecentlyDeleted) {
@@ -311,6 +319,8 @@ export default function FileSystemManager({
           conditions: filterConditions,
           sort,
           fileTypes: activeFileTypes,
+          photo: activePhotoFilter,
+          stack: stack || undefined,
         },
       })
       if (!res.ok) throw new Error('failed to search files')

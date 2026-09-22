@@ -1,0 +1,356 @@
+/**
+ * Read the camera settings a photo was taken with (camera, lens, exposure, date taken, and the
+ * Fujifilm film simulation) from its EXIF, without decoding the image.
+ *
+ * Handles JPEG (APP1 "Exif"), TIFF-based RAW files (Sony ARW, Nikon NEF, Canon CR2, DNG, ...) and
+ * Fujifilm RAF (whose header points at an embedded JPEG that carries the full EXIF). Reads go
+ * through the same bounds-checked `ByteSource` as the RAW preview parser, so only the header and
+ * the few IFDs involved are read, and every file-controlled offset and loop is capped.
+ */
+import * as fs from 'fs'
+import { type ByteSource, BufferSource, FileSource, detectRawFormat } from './raw-preview'
+
+export interface PhotoExif {
+  make?: string
+  model?: string
+  lensModel?: string
+  /**
+   * When the photo was taken, as an ISO string. When the camera recorded its UTC offset
+   * (OffsetTimeOriginal) this is the true instant; otherwise the camera's wall-clock time is
+   * written as if it were UTC.
+   */
+  capturedAt?: string
+  /** Seconds. */
+  exposureTime?: number
+  fNumber?: number
+  iso?: number
+  /** Millimetres. */
+  focalLength?: number
+  focalLength35?: number
+  /** Fujifilm film simulation, e.g. "Classic Chrome" or "Acros Ye". */
+  filmSimulation?: string
+}
+
+const MAX_IFD_ENTRIES = 512
+const MAX_STRING = 256
+const MAX_JPEG_SEGMENTS = 64
+
+const TAG_MAKE = 0x010f
+const TAG_MODEL = 0x0110
+const TAG_DATETIME = 0x0132
+const TAG_EXIF_IFD = 0x8769
+const TAG_EXPOSURE_TIME = 0x829a
+const TAG_F_NUMBER = 0x829d
+const TAG_ISO = 0x8827
+const TAG_DATETIME_ORIGINAL = 0x9003
+const TAG_OFFSET_TIME_ORIGINAL = 0x9011
+const TAG_FOCAL_LENGTH = 0x920a
+const TAG_MAKER_NOTE = 0x927c
+const TAG_SUBSEC_ORIGINAL = 0x9291
+const TAG_FOCAL_LENGTH_35 = 0xa405
+const TAG_LENS_MODEL = 0xa434
+
+const FUJI_SATURATION = 0x1003
+const FUJI_FILM_MODE = 0x1401
+
+const TYPE_SIZE = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 4]
+
+interface Tiff {
+  src: ByteSource
+  base: number
+  be: boolean
+}
+
+interface Entry {
+  tag: number
+  type: number
+  count: number
+  valueOffset: number
+}
+
+function readIfd(t: Tiff, at: number): Entry[] {
+  const head = t.src.read(at, 2)
+  if (!head) return []
+  const count = t.be ? head.readUInt16BE(0) : head.readUInt16LE(0)
+  if (count === 0 || count > MAX_IFD_ENTRIES) return []
+  const table = t.src.read(at + 2, count * 12)
+  if (!table) return []
+  const entries: Entry[] = []
+  for (let i = 0; i < count; i++) {
+    const p = i * 12
+    const tag = t.be ? table.readUInt16BE(p) : table.readUInt16LE(p)
+    const type = t.be ? table.readUInt16BE(p + 2) : table.readUInt16LE(p + 2)
+    const n = t.be ? table.readUInt32BE(p + 4) : table.readUInt32LE(p + 4)
+    const size = TYPE_SIZE[type] ?? 0
+    if (size === 0 || n === 0) continue
+    const total = size * n
+    const valueOffset =
+      total <= 4
+        ? at + 2 + p + 8
+        : t.base + (t.be ? table.readUInt32BE(p + 8) : table.readUInt32LE(p + 8))
+    entries.push({ tag, type, count: n, valueOffset })
+  }
+  return entries
+}
+
+function find(entries: Entry[], tag: number): Entry | undefined {
+  return entries.find((e) => e.tag === tag)
+}
+
+function readString(t: Tiff, e: Entry | undefined): string | undefined {
+  if (!e || (e.type !== 2 && e.type !== 7)) return undefined
+  const b = t.src.read(e.valueOffset, Math.min(e.count, MAX_STRING))
+  if (!b) return undefined
+  const s = b.toString('latin1').replace(/\0.*$/s, '').trim()
+  return s || undefined
+}
+
+function readNumber(t: Tiff, e: Entry | undefined): number | undefined {
+  if (!e) return undefined
+  const size = TYPE_SIZE[e.type] ?? 0
+  const b = t.src.read(e.valueOffset, size)
+  if (!b) return undefined
+  const u16 = (o: number) => (t.be ? b.readUInt16BE(o) : b.readUInt16LE(o))
+  const u32 = (o: number) => (t.be ? b.readUInt32BE(o) : b.readUInt32LE(o))
+  const s32 = (o: number) => (t.be ? b.readInt32BE(o) : b.readInt32LE(o))
+  switch (e.type) {
+    case 1:
+      return b[0]
+    case 3:
+      return u16(0)
+    case 4:
+      return u32(0)
+    case 5: {
+      const d = u32(4)
+      return d === 0 ? undefined : u32(0) / d
+    }
+    case 10: {
+      const d = s32(4)
+      return d === 0 ? undefined : s32(0) / d
+    }
+    default:
+      return undefined
+  }
+}
+
+/** The TIFF header offset of the first "Exif" APP1 segment of the JPEG at `offset`. */
+function jpegTiffBase(src: ByteSource, offset: number): number | null {
+  const soi = src.read(offset, 2)
+  if (!soi || soi[0] !== 0xff || soi[1] !== 0xd8) return null
+  let p = offset + 2
+  for (let i = 0; i < MAX_JPEG_SEGMENTS; i++) {
+    const h = src.read(p, 4)
+    if (!h || h[0] !== 0xff) return null
+    const marker = h[1]
+    if (marker === 0xda || marker === 0xd9) return null
+    const len = h.readUInt16BE(2)
+    if (len < 2) return null
+    if (marker === 0xe1 && src.read(p + 4, 6)?.toString('latin1') === 'Exif\0\0') return p + 10
+    p += 2 + len
+  }
+  return null
+}
+
+function openTiff(src: ByteSource, base: number): { t: Tiff; ifd0: number } | null {
+  const h = src.read(base, 8)
+  if (!h) return null
+  const order = h.toString('latin1', 0, 2)
+  if (order !== 'II' && order !== 'MM') return null
+  const be = order === 'MM'
+  const ifd0 = be ? h.readUInt32BE(4) : h.readUInt32LE(4)
+  return { t: { src, base, be }, ifd0: base + ifd0 }
+}
+
+// Fujifilm MakerNote FilmMode (0x1401) and, for monochrome, Saturation (0x1003) values, as
+// documented by ExifTool's FujiFilm tables.
+const FUJI_FILM_MODES: Record<number, string> = {
+  0x000: 'Provia',
+  0x100: 'Studio Portrait',
+  0x110: 'Studio Portrait Enhanced Saturation',
+  0x120: 'Astia',
+  0x130: 'Studio Portrait Increased Sharpness',
+  0x200: 'Velvia',
+  0x300: 'Studio Portrait Ex',
+  0x400: 'Velvia',
+  0x500: 'Pro Neg. Std',
+  0x501: 'Pro Neg. Hi',
+  0x600: 'Classic Chrome',
+  0x700: 'Eterna',
+  0x800: 'Classic Neg.',
+  0x900: 'Eterna Bleach Bypass',
+  0xa00: 'Nostalgic Neg.',
+  0xb00: 'Reala Ace',
+}
+
+const FUJI_MONOCHROME: Record<number, string> = {
+  0x300: 'Monochrome',
+  0x301: 'Monochrome R',
+  0x302: 'Monochrome Ye',
+  0x303: 'Monochrome G',
+  0x310: 'Sepia',
+  0x500: 'Acros',
+  0x501: 'Acros R',
+  0x502: 'Acros Ye',
+  0x503: 'Acros G',
+}
+
+function readFujiFilmSimulation(src: ByteSource, note: Entry): string | undefined {
+  // "FUJIFILM" + little-endian offset of the IFD, both relative to the start of the note.
+  const head = src.read(note.valueOffset, 12)
+  if (!head || head.toString('latin1', 0, 8) !== 'FUJIFILM') return undefined
+  const t: Tiff = { src, base: note.valueOffset, be: false }
+  const entries = readIfd(t, note.valueOffset + head.readUInt32LE(8))
+  const saturation = readNumber(t, find(entries, FUJI_SATURATION))
+  if (saturation !== undefined && FUJI_MONOCHROME[saturation]) return FUJI_MONOCHROME[saturation]
+  const mode = readNumber(t, find(entries, FUJI_FILM_MODE))
+  return mode === undefined ? undefined : FUJI_FILM_MODES[mode]
+}
+
+/** "2026:09:20 14:03:22" (+ sub-seconds, + "-07:00") to an ISO string. */
+export function exifDateToIso(
+  value: string | undefined,
+  subSec?: string,
+  offset?: string,
+): string | undefined {
+  const m = value?.match(/^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/)
+  if (!m) return undefined
+  const [, y, mo, d, h, mi, s] = m
+  if (y === '0000') return undefined
+  const ms = (subSec?.match(/^\d+/)?.[0] ?? '0').padEnd(3, '0').slice(0, 3)
+  const zone = offset?.match(/^[+-]\d{2}:\d{2}$/) ? offset : 'Z'
+  const date = new Date(`${y}-${mo}-${d}T${h}:${mi}:${s}.${ms}${zone}`)
+  return isNaN(date.getTime()) ? undefined : date.toISOString()
+}
+
+function round(n: number | undefined, digits: number): number | undefined {
+  if (n === undefined || !Number.isFinite(n) || n <= 0) return undefined
+  const f = 10 ** digits
+  return Math.round(n * f) / f
+}
+
+function readTiffExif(src: ByteSource, base: number): PhotoExif | null {
+  const opened = openTiff(src, base)
+  if (!opened) return null
+  const { t, ifd0 } = opened
+  const top = readIfd(t, ifd0)
+  if (top.length === 0) return null
+
+  const out: PhotoExif = {
+    make: readString(t, find(top, TAG_MAKE)),
+    model: readString(t, find(top, TAG_MODEL)),
+  }
+  let dateTime = readString(t, find(top, TAG_DATETIME))
+
+  const exifPtr = readNumber(t, find(top, TAG_EXIF_IFD))
+  if (exifPtr !== undefined && exifPtr > 0) {
+    const exif = readIfd(t, base + exifPtr)
+    const original = readString(t, find(exif, TAG_DATETIME_ORIGINAL))
+    if (original) dateTime = original
+    out.capturedAt = exifDateToIso(
+      dateTime,
+      original ? readString(t, find(exif, TAG_SUBSEC_ORIGINAL)) : undefined,
+      original ? readString(t, find(exif, TAG_OFFSET_TIME_ORIGINAL)) : undefined,
+    )
+    out.exposureTime = round(readNumber(t, find(exif, TAG_EXPOSURE_TIME)), 6)
+    out.fNumber = round(readNumber(t, find(exif, TAG_F_NUMBER)), 1)
+    out.iso = round(readNumber(t, find(exif, TAG_ISO)), 0)
+    out.focalLength = round(readNumber(t, find(exif, TAG_FOCAL_LENGTH)), 1)
+    out.focalLength35 = round(readNumber(t, find(exif, TAG_FOCAL_LENGTH_35)), 0)
+    out.lensModel = readString(t, find(exif, TAG_LENS_MODEL))
+    const note = find(exif, TAG_MAKER_NOTE)
+    if (note && /fujifilm/i.test(out.make ?? '')) {
+      out.filmSimulation = readFujiFilmSimulation(src, note)
+    }
+  } else {
+    out.capturedAt = exifDateToIso(dateTime)
+  }
+
+  for (const k of Object.keys(out) as (keyof PhotoExif)[]) {
+    if (out[k] === undefined) delete out[k]
+  }
+  return Object.keys(out).length > 0 ? out : null
+}
+
+/** The photo's camera settings, or null when it has no readable EXIF. Never throws. */
+export function readPhotoExif(src: ByteSource, filename = ''): PhotoExif | null {
+  try {
+    const magic = src.read(0, Math.min(2, src.size()))
+    if (magic && magic[0] === 0xff && magic[1] === 0xd8) {
+      const base = jpegTiffBase(src, 0)
+      return base === null ? null : readTiffExif(src, base)
+    }
+    const format = detectRawFormat(src, filename)
+    if (format === 'tiff') return readTiffExif(src, 0)
+    if (format === 'raf') {
+      // Fuji's header: big-endian offset of the embedded JPEG at 0x54.
+      const off = src.read(0x54, 4)?.readUInt32BE(0)
+      const base = off ? jpegTiffBase(src, off) : null
+      return base === null ? null : readTiffExif(src, base)
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+export function readPhotoExifFromBuffer(data: Uint8Array, filename = ''): PhotoExif | null {
+  return readPhotoExif(new BufferSource(data), filename)
+}
+
+export function readPhotoExifFromFile(filePath: string): PhotoExif | null {
+  let fd: number | undefined
+  try {
+    fd = fs.openSync(filePath, 'r')
+    return readPhotoExif(new FileSource(fd), filePath)
+  } catch {
+    return null
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd)
+  }
+}
+
+/** "FUJIFILM" + "X100VI" -> "FUJIFILM X100VI"; a model that already names its maker is kept. */
+export function cameraName(make?: string, model?: string): string | undefined {
+  if (!model) return make
+  if (!make) return model
+  const brand = make.split(/\s+/)[0].toLowerCase()
+  return model.toLowerCase().startsWith(brand) ? model : `${make} ${model}`
+}
+
+/** 0.004 -> "1/250", 0.5 -> "1/2", 2 -> "2s", 1.3 -> "1.3s". */
+export function formatShutterSpeed(seconds?: number): string | undefined {
+  if (seconds === undefined || !(seconds > 0)) return undefined
+  if (seconds >= 1) return `${Math.round(seconds * 10) / 10}s`
+  return `1/${Math.round(1 / seconds)}`
+}
+
+/** The metadata-field updates for a photo's EXIF (keys from `system_fields.ts`). */
+export function photoExifMetadata(
+  exif: PhotoExif | null,
+): { key: string; value: string | number }[] {
+  if (!exif) return []
+  const updates: { key: string; value: string | number }[] = []
+  const camera = cameraName(exif.make, exif.model)
+  if (exif.capturedAt) updates.push({ key: 'capture_date', value: exif.capturedAt })
+  if (camera) updates.push({ key: 'camera', value: camera })
+  if (exif.lensModel) updates.push({ key: 'lens', value: exif.lensModel })
+  if (exif.filmSimulation) updates.push({ key: 'film_simulation', value: exif.filmSimulation })
+  if (exif.focalLength) updates.push({ key: 'focal_length', value: exif.focalLength })
+  if (exif.fNumber) updates.push({ key: 'aperture', value: exif.fNumber })
+  const shutter = formatShutterSpeed(exif.exposureTime)
+  if (shutter) updates.push({ key: 'shutter_speed', value: shutter })
+  if (exif.iso) updates.push({ key: 'iso', value: exif.iso })
+  return updates
+}
+
+/** The metadata keys `photoExifMetadata` can write. */
+export const PHOTO_EXIF_FIELD_KEYS = [
+  'capture_date',
+  'camera',
+  'lens',
+  'film_simulation',
+  'focal_length',
+  'aperture',
+  'shutter_speed',
+  'iso',
+] as const

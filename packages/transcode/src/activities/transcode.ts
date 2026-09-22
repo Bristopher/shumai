@@ -6,6 +6,7 @@ import { getDerivedArtifactDirectory, stemFromKey } from '@shumai/core/src/utils
 import { gotenbergService } from '@shumai/core/src/gotenberg/gotenberg'
 import { parseCsvContent } from '@shumai/core/src/transcode/transcode'
 import { classifyXmp, isXmpSidecar, pickXmpSource } from '@shumai/core/src/utils/xmp-sidecar'
+import { photoExifMetadata, readPhotoExifFromFile } from '@shumai/core/src/utils/photo-exif'
 import {
   getProxyType,
   isCsvDocument,
@@ -81,6 +82,8 @@ export async function getMediaInfoActivity(params: {
   assetId: string
   proxyType?: 'image' | 'video' | 'audio' | 'pdf' | null
   mediaType?: string
+  /** The file to read camera EXIF from when `filePath` is a render (an XMP sidecar's photo). */
+  exifSourcePath?: string
 }): Promise<PrismaJson.MediaInfo> {
   try {
     const proxyType =
@@ -152,6 +155,7 @@ export async function getMediaInfoActivity(params: {
         { key: 'bitRate', value: info.bitRate / 1000 },
         { key: 'frame_rate', value: info.frameRate },
       )
+      if (info.creationTime) metadataUpdates.push({ key: 'capture_date', value: info.creationTime })
       if (info.videoCodec) metadataUpdates.push({ key: 'video_codec', value: info.videoCodec })
       if (info.audioCodec) metadataUpdates.push({ key: 'audio_codec', value: info.audioCodec })
       if (info.audioChannels !== undefined)
@@ -206,6 +210,7 @@ export async function getMediaInfoActivity(params: {
       metadataUpdates.push(
         { key: 'resolution_width', value: info.originalWidth },
         { key: 'resolution_height', value: info.originalHeight },
+        ...photoExifMetadata(readPhotoExifFromFile(params.exifSourcePath ?? params.filePath)),
       )
     } else if (isPdf) {
       const info = await transcodeService.getPdfInfo(params.filePath)

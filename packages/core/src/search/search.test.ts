@@ -1183,3 +1183,198 @@ describe('SearchService — file-type filter', () => {
     expect(deep.find((c) => c.extension === 'raf')?.count).toBe(2)
   })
 })
+
+describe('SearchService — photo browsing (stacks, date taken, camera filter)', () => {
+  setupTestDbHooks()
+
+  let searchService: SearchService
+  let rootId: string
+  const ids: Record<string, string> = {}
+
+  // name, size, camera EXIF (date taken, camera, film simulation)
+  const files: Array<[string, number, string | null, string | null, string | null]> = [
+    ['DSCF5543.JPG', 20, '2026-09-06T15:32:57.000Z', 'FUJIFILM X100VI', 'Classic Neg.'],
+    ['DSCF5543.RAF', 40, '2026-09-06T15:32:57.000Z', 'FUJIFILM X100VI', 'Classic Neg.'],
+    ['DSCF5543.RAF.xmp', 1, '2026-09-06T15:32:57.000Z', 'FUJIFILM X100VI', 'Classic Neg.'],
+    ['DSCF5543.JPG.xmp', 1, null, null, null],
+    ['DSCF5544.RAF', 40, '2026-09-07T10:00:00.000Z', 'FUJIFILM X100VI', 'Acros'],
+    ['DSCF5544.xmp', 1, null, null, null],
+    ['_DSC2028.ARW', 50, '2026-09-05T08:00:00.000Z', 'SONY ILCE-7CM2', null],
+    ['notes', 2, null, null, null],
+  ]
+
+  beforeEach(async () => {
+    searchService = new SearchService()
+    const team = await prisma.team.create({ data: { name: 'photo-team' } })
+    const project = await prisma.project.create({ data: { name: 'p', teamId: team.id } })
+    const root = await prisma.asset.create({
+      data: { name: 'root', type: AssetType.folder, projectId: project.id, status: 'uploaded' },
+    })
+    rootId = root.id
+    for (const [name, size, taken, camera, film] of files) {
+      const a = await prisma.asset.create({
+        data: {
+          name,
+          sizeByte: size,
+          type: AssetType.file,
+          projectId: project.id,
+          parentId: root.id,
+          status: 'processed',
+        },
+      })
+      ids[name] = a.id
+      if (taken) {
+        await prisma.assetMetadataValue.create({
+          data: { assetId: a.id, fieldKey: 'capture_date', dateValue: new Date(taken) },
+        })
+      }
+      if (camera) {
+        await prisma.assetMetadataValue.create({
+          data: { assetId: a.id, fieldKey: 'camera', stringValue: camera },
+        })
+      }
+      if (film) {
+        await prisma.assetMetadataValue.create({
+          data: { assetId: a.id, fieldKey: 'film_simulation', stringValue: film },
+        })
+      }
+    }
+  })
+
+  const search = (extra: Record<string, unknown>) =>
+    searchService.search(rootId, {
+      assetType: 'file',
+      recursively: false,
+      operator: 'AND',
+      conditions: [],
+      isSemantic: false,
+      sort: { field: 'name', order: 'asc' },
+      ...extra,
+    })
+
+  it('shows one item per shot, the camera JPEG first, with the rest in `stack`', async () => {
+    const res = await search({ stack: true })
+    expect(res.data.map((a) => a.name)).toEqual([
+      '_DSC2028.ARW',
+      'DSCF5543.JPG',
+      'DSCF5544.RAF',
+      'notes',
+    ])
+    expect(res.pageInfo.total).toBe(4)
+    // Every file of the shown stacks counts toward the size.
+    expect(res.pageInfo.totalSize).toBe(155)
+    // The name collation sorts "_" before letters.
+    expect(res.data[0].stack).toBeUndefined()
+    expect(res.data[1].stack).toEqual({
+      count: 4,
+      members: [
+        { id: ids['DSCF5543.JPG'], name: 'DSCF5543.JPG' },
+        { id: ids['DSCF5543.RAF'], name: 'DSCF5543.RAF' },
+        { id: ids['DSCF5543.JPG.xmp'], name: 'DSCF5543.JPG.xmp' },
+        { id: ids['DSCF5543.RAF.xmp'], name: 'DSCF5543.RAF.xmp' },
+      ],
+    })
+    expect(res.data[2].stack?.members.map((m) => m.name)).toEqual(['DSCF5544.RAF', 'DSCF5544.xmp'])
+  })
+
+  it('stacks after the file-type filter, so hidden files neither lead nor count', async () => {
+    const noSidecars = await search({ stack: true, fileTypes: { exclude: ['group:editing'] } })
+    expect(noSidecars.data.map((a) => a.name)).toEqual([
+      '_DSC2028.ARW',
+      'DSCF5543.JPG',
+      'DSCF5544.RAF',
+      'notes',
+    ])
+    expect(noSidecars.data[1].stack?.members.map((m) => m.name)).toEqual([
+      'DSCF5543.JPG',
+      'DSCF5543.RAF',
+    ])
+    expect(noSidecars.data[2].stack).toBeUndefined()
+
+    const rawOnly = await search({ stack: true, fileTypes: { include: ['group:raw'] } })
+    expect(rawOnly.data.map((a) => a.name)).toEqual([
+      '_DSC2028.ARW',
+      'DSCF5543.RAF',
+      'DSCF5544.RAF',
+    ])
+  })
+
+  it('pages stacked results without repeating or skipping shots', async () => {
+    const first = await search({ stack: true, first: 2 })
+    const second = await search({ stack: true, first: 2, after: first.pageInfo.cursor })
+    expect([...first.data, ...second.data].map((a) => a.name)).toEqual([
+      '_DSC2028.ARW',
+      'DSCF5543.JPG',
+      'DSCF5544.RAF',
+      'notes',
+    ])
+  })
+
+  it('sorts by date taken, files without one last', async () => {
+    const res = await search({
+      sort: { field: 'captureDate', order: 'desc' },
+      fileTypes: { exclude: ['group:editing'] },
+    })
+    expect(res.data.map((a) => a.name)).toEqual([
+      'DSCF5544.RAF',
+      'DSCF5543.RAF',
+      'DSCF5543.JPG',
+      '_DSC2028.ARW',
+      'notes',
+    ])
+    const asc = await search({
+      sort: { field: 'captureDate', order: 'asc' },
+      fileTypes: { exclude: ['group:editing'] },
+    })
+    expect(asc.data.map((a) => a.name)).toEqual([
+      '_DSC2028.ARW',
+      'DSCF5543.JPG',
+      'DSCF5543.RAF',
+      'DSCF5544.RAF',
+      'notes',
+    ])
+  })
+
+  it('filters by camera and film simulation (values ORed, facets ANDed)', async () => {
+    const fuji = await search({ photo: { camera: ['FUJIFILM X100VI'] } })
+    expect(fuji.data.map((a) => a.name)).toEqual([
+      'DSCF5543.JPG',
+      'DSCF5543.RAF',
+      'DSCF5543.RAF.xmp',
+      'DSCF5544.RAF',
+    ])
+    const acros = await search({
+      photo: { camera: ['FUJIFILM X100VI', 'SONY ILCE-7CM2'], filmSimulation: ['Acros'] },
+    })
+    expect(acros.data.map((a) => a.name)).toEqual(['DSCF5544.RAF'])
+    const stacked = await search({ stack: true, photo: { filmSimulation: ['Classic Neg.'] } })
+    expect(stacked.data.map((a) => a.name)).toEqual(['DSCF5543.JPG'])
+    expect(stacked.data[0].stack?.count).toBe(3)
+  })
+
+  it('counts shots, not files, per camera and film simulation', async () => {
+    const facets = await searchService.photoFacets(rootId)
+    expect(facets.camera).toEqual([
+      { value: 'FUJIFILM X100VI', count: 2 },
+      { value: 'SONY ILCE-7CM2', count: 1 },
+    ])
+    expect(facets.filmSimulation).toEqual([
+      { value: 'Acros', count: 1 },
+      { value: 'Classic Neg.', count: 1 },
+    ])
+    expect(facets.lens).toEqual([])
+  })
+
+  it('lists the files of a shot from any of them', async () => {
+    const members = await searchService.stackMembersOf(ids['DSCF5543.RAF.xmp'])
+    expect(members.map((m) => m.name)).toEqual([
+      'DSCF5543.JPG',
+      'DSCF5543.RAF',
+      'DSCF5543.JPG.xmp',
+      'DSCF5543.RAF.xmp',
+    ])
+    expect(await searchService.stackMembersOf(ids['notes'])).toEqual([
+      { id: ids['notes'], name: 'notes' },
+    ])
+  })
+})

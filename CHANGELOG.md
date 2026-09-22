@@ -11,6 +11,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **transcode**: Camera RAW photos (Fujifilm RAF, Sony ARW, Nikon NEF, Canon CR2, DNG and more) now show thumbnails and previews instead of a generic file icon, using the preview image the camera already stores inside each file, so they appear in milliseconds and keep the camera's own look, such as Fujifilm film simulations
 - **transcode**: XMP sidecar files (from darktable, Lightroom and others) now show a preview of the photo they belong to instead of a blank file icon; edits made in darktable are applied to that preview, so you can see the edited look right next to the original
 - **file-browser**: Add a "Type" filter next to Sort: hide editing and sidecar files such as XMP with one switch, or show only RAW photos, JPEGs, HEIF, videos or any file extension found in the current folder (with counts); the choice is remembered per project
+- **transcode**: Photos and videos now record when they were taken, and photos their camera, lens, focal length, aperture, shutter speed, ISO and Fujifilm film simulation, read from the file's own metadata; they show as fields and as a short camera summary above a file's comments
+- **file-browser**: Sort files by "Date Taken", with a heading for each day
+- **file-browser**: Add a "Camera" filter next to Type that narrows the folder to chosen cameras, lenses or film simulations, with how many shots use each
+- **file-browser**: Add a "Stack" button that shows all the files of one shot (for example DSCF5543.JPG, DSCF5543.RAF and its XMP sidecars) as a single card with a file count; deleting, moving or downloading a stacked card covers every file in it, and the file view lists the shot's files so you can switch between them
 
 ### Fixed
 

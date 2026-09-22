@@ -1456,5 +1456,19 @@
   "file_type_group_editing": "Editing files",
   "file_type_in_this_folder": "In this folder",
   "file_type_no_extension": "No extension",
-  "file_type_clear": "Clear"
+  "file_type_clear": "Clear",
+  "sort_date_taken": "Date Taken",
+  "photo_filter": "Camera",
+  "photo_filter_title": "Filter by camera, lens or film simulation",
+  "photo_filter_camera": "Camera",
+  "photo_filter_lens": "Lens",
+  "photo_filter_film_simulation": "Film simulation",
+  "photo_filter_empty": "No camera details in this folder yet.",
+  "stack_toggle": "Stack",
+  "stack_toggle_on_hint": "Files of one shot (JPG, RAW, XMP) show as one card. Click to show every file.",
+  "stack_toggle_off_hint": "Show the files of one shot (JPG, RAW, XMP) as one card",
+  "stack_files": "{count} files",
+  "stack_versions_label": "Files in this shot",
+  "photo_info_title": "Camera",
+  "date_group_undated": "No date taken"
 }

@@ -1,5 +1,36 @@
 import { Prisma } from '@shumai/db'
-import { SearchCondition, expandFileTypes, type FileTypeFilter } from '@shumai/dtos'
+import {
+  FILE_TYPE_GROUPS,
+  PHOTO_FACETS,
+  SearchCondition,
+  expandFileTypes,
+  type FileTypeFilter,
+  type PhotoFacet,
+  type PhotoFilter,
+} from '@shumai/dtos'
+
+// The backslashes in these SQL regexes are doubled for the template literal.
+const LAST_EXTENSION_SQL = Prisma.sql`lower(substring(a.name from '\\.([^.]+)$'))`
+
+/**
+ * A file's stack key: lowercased name without a trailing ".xmp", then without its last extension
+ * (DSCF5543.JPG, .RAF, .RAF.xmp and .xmp all give "dscf5543"). Mirrors `stackKey()` in dtos.
+ */
+export const STACK_KEY_SQL = Prisma.sql`regexp_replace(regexp_replace(lower(a.name), '\\.xmp$', ''), '\\.[^.]+$', '')`
+
+/**
+ * Which file of a stack is shown: a ready-to-view photo first (the camera JPEG carries its film
+ * simulation), then RAW, video, anything else, and editing sidecars last.
+ */
+export const STACK_RANK_SQL = Prisma.sql`(CASE
+  WHEN ${LAST_EXTENSION_SQL} = ANY(${['jpg', 'jpeg', 'heic', 'heif', 'hif', 'png', 'tif', 'tiff', 'webp', 'avif']}::text[]) THEN 0
+  WHEN ${LAST_EXTENSION_SQL} = ANY(${[...FILE_TYPE_GROUPS.raw]}::text[]) THEN 1
+  WHEN ${LAST_EXTENSION_SQL} = ANY(${[...FILE_TYPE_GROUPS.video]}::text[]) THEN 2
+  WHEN ${LAST_EXTENSION_SQL} = ANY(${[...FILE_TYPE_GROUPS.editing]}::text[]) THEN 4
+  ELSE 3 END)`
+
+/** "Date taken": the capture_date metadata value, null when the file has none. */
+export const CAPTURE_DATE_SQL = Prisma.sql`(SELECT v.date_value FROM asset_metadata_values v WHERE v.asset_id = a.id AND v.field_key = 'capture_date')`
 
 export class SqlQueryBuilder {
   private selectSql: Prisma.Sql = Prisma.sql`*`
@@ -8,6 +39,7 @@ export class SqlQueryBuilder {
   private orderSql: Prisma.Sql | null = null
   private limitCount: number | null = null
   private offsetCount: number | null = null
+  private stacked = false
 
   select(fields: Prisma.Sql): this {
     this.selectSql = fields
@@ -40,6 +72,28 @@ export class SqlQueryBuilder {
   }
 
   /**
+   * Collapse the rows sharing a folder and a stack key to the one ranked first. The outer query
+   * still aliases rows as `a` and adds `a.stack_count` (files in the stack) and `a.stack_size`
+   * (their total bytes), so select, order and count clauses work unchanged.
+   */
+  stackByBaseName(enabled = true): this {
+    this.stacked = enabled
+    return this
+  }
+
+  /** Keep files whose camera EXIF matches every non-empty facet of `filter` (values are ORed). */
+  addPhotoFilter(filter?: PhotoFilter): this {
+    for (const facet of Object.keys(PHOTO_FACETS) as PhotoFacet[]) {
+      const values = filter?.[facet]
+      if (!values || values.length === 0) continue
+      this.addWhere(
+        Prisma.sql`a.id IN (SELECT asset_id FROM asset_metadata_values WHERE field_key = ${PHOTO_FACETS[facet]} AND string_value = ANY(${values}::text[]))`,
+      )
+    }
+    return this
+  }
+
+  /**
    * Keep files whose last extension is in `filter.include`, and drop those in `filter.exclude`.
    * Groups ("group:raw") are expanded; matching is case-insensitive. Files with no extension are
    * kept by an exclude filter and dropped by an include filter.
@@ -47,8 +101,7 @@ export class SqlQueryBuilder {
   addFileTypeFilter(filter?: FileTypeFilter): this {
     const include = expandFileTypes(filter?.include)
     const exclude = expandFileTypes(filter?.exclude)
-    // The SQL regex is '\.([^.]+)$': the backslash is doubled for the template literal.
-    const ext = Prisma.sql`lower(substring(a.name from '\\.([^.]+)$'))`
+    const ext = LAST_EXTENSION_SQL
     if (include.length > 0) {
       this.addWhere(Prisma.sql`${ext} = ANY(${include}::text[])`)
     }
@@ -89,16 +142,27 @@ export class SqlQueryBuilder {
       throw new Error('FROM clause is required in SqlQueryBuilder')
     }
 
-    const queryParts: Prisma.Sql[] = [
-      Prisma.sql`SELECT`,
-      this.selectSql,
-      Prisma.sql`FROM`,
-      this.fromSql,
-    ]
+    const queryParts: Prisma.Sql[] = [Prisma.sql`SELECT`, this.selectSql, Prisma.sql`FROM`]
 
-    if (this.wheres.length > 0) {
-      queryParts.push(Prisma.sql`WHERE`)
-      queryParts.push(Prisma.join(this.wheres, ' AND '))
+    if (this.stacked) {
+      const where =
+        this.wheres.length > 0
+          ? Prisma.sql`WHERE ${Prisma.join(this.wheres, ' AND ')}`
+          : Prisma.empty
+      const partition = Prisma.sql`PARTITION BY a.parent_id, ${STACK_KEY_SQL}`
+      queryParts.push(Prisma.sql`(
+        SELECT a.*,
+          row_number() OVER (${partition} ORDER BY ${STACK_RANK_SQL}, a.name, a.id) AS stack_rn,
+          count(*) OVER (${partition}) AS stack_count,
+          sum(COALESCE(a.size_byte, 0)) OVER (${partition}) AS stack_size
+        FROM ${this.fromSql} ${where}
+      ) a WHERE a.stack_rn = 1`)
+    } else {
+      queryParts.push(this.fromSql)
+      if (this.wheres.length > 0) {
+        queryParts.push(Prisma.sql`WHERE`)
+        queryParts.push(Prisma.join(this.wheres, ' AND '))
+      }
     }
 
     if (this.orderSql) {

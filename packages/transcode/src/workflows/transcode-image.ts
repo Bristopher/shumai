@@ -41,6 +41,7 @@ export async function transcodeImageWorkflow(task: WorkflowTask): Promise<void> 
       assetKey: key,
     })
     let { filePath } = download
+    let exifSourcePath: string | undefined
     tmpDir = download.tmpDir
 
     // An XMP sidecar previews as the photo it describes, with its edits applied when they can be
@@ -69,6 +70,7 @@ export async function transcodeImageWorkflow(task: WorkflowTask): Promise<void> 
         photoPath: photo.filePath,
       })
       filePath = rendered.path
+      exifSourcePath = photo.filePath
     }
 
     const spec = task.payload?.transcode || {}
@@ -77,6 +79,7 @@ export async function transcodeImageWorkflow(task: WorkflowTask): Promise<void> 
       assetId: asset.id,
       proxyType: 'image',
       mediaType: asset.mediaType || '',
+      exifSourcePath,
     })
 
     mediaInfo.original = {

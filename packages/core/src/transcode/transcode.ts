@@ -98,6 +98,8 @@ export interface MediaMetadata {
   frameRate: number
   totalFrames: number
   startTimecode?: string
+  /** Container creation time (QuickTime `creation_time`, UTC), as an ISO string. */
+  creationTime?: string
   hasAudio: boolean
   videoCodec?: string
   audioCodec?: string
@@ -595,6 +597,13 @@ export class TranscodeService {
       totalFrames = Math.round(duration * fps)
     }
     const startTimecode = videoStream.tags?.timecode || info.format?.tags?.timecode
+    const createdTag = info.format?.tags?.creation_time || videoStream.tags?.creation_time
+    const created = createdTag ? new Date(createdTag) : null
+    // Some encoders write 1904-01-01 (a zero QuickTime timestamp) or 1970 when the clock is unset.
+    const creationTime =
+      created && !isNaN(created.getTime()) && created.getUTCFullYear() > 1990
+        ? created.toISOString()
+        : undefined
 
     let videoBitRate: number | undefined
     if (videoStream.bit_rate && parseInt(videoStream.bit_rate, 10) > 0) {
@@ -631,6 +640,7 @@ export class TranscodeService {
       frameRate: fps || 30,
       totalFrames: totalFrames || 0,
       startTimecode,
+      creationTime,
       hasAudio: !!audioStream,
       videoCodec: this.resolveCodecName(videoStream),
       audioCodec: audioStream ? this.resolveCodecName(audioStream) : undefined,

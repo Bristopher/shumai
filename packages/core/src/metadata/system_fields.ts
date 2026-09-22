@@ -189,6 +189,64 @@ export const systemFields: Prisma.MetadataFieldCreateInput[] = [
       text: {},
     },
   },
+  // Photo EXIF, written by getMediaInfoActivity from `photoExifMetadata()` (utils/photo-exif.ts).
+  {
+    key: 'capture_date',
+    scope: 'SYSTEM',
+    readOnly: true,
+    config: {
+      name: 'Date Taken',
+      type: 'date',
+      date: {
+        displayFormat: 'friendly',
+        displayTimezone: false,
+        includeTime: true,
+        timeFormat: 'twelve_hour',
+      },
+    },
+  },
+  {
+    key: 'camera',
+    scope: 'SYSTEM',
+    readOnly: true,
+    config: { name: 'Camera', type: 'text', text: {} },
+  },
+  {
+    key: 'lens',
+    scope: 'SYSTEM',
+    readOnly: true,
+    config: { name: 'Lens', type: 'text', text: {} },
+  },
+  {
+    key: 'film_simulation',
+    scope: 'SYSTEM',
+    readOnly: true,
+    config: { name: 'Film Simulation', type: 'text', text: {} },
+  },
+  {
+    key: 'focal_length',
+    scope: 'SYSTEM',
+    readOnly: true,
+    config: { name: 'Focal Length', type: 'number', number: { scale: 1 } },
+  },
+  {
+    key: 'aperture',
+    scope: 'SYSTEM',
+    readOnly: true,
+    config: { name: 'Aperture', type: 'number', number: { scale: 1 } },
+  },
+  {
+    key: 'shutter_speed',
+    scope: 'SYSTEM',
+    readOnly: true,
+    config: { name: 'Shutter Speed', type: 'text', text: {} },
+  },
+  {
+    key: 'iso',
+    scope: 'SYSTEM',
+    readOnly: true,
+    config: { name: 'ISO', type: 'number', number: { scale: 0 } },
+  },
   {
     key: 'status',
     scope: 'SYSTEM',

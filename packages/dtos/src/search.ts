@@ -1,4 +1,5 @@
 import { fileTypeFilterSchema } from './file-types'
+import { photoFilterSchema } from './photo'
 import { z } from 'zod'
 import { paginationParamsSchema } from './pagination'
 
@@ -61,6 +62,10 @@ export const searchFilterSchema = z.object({
   previewFormat: previewFormatSchema.optional(),
   /** File-type filter (extensions and groups), applied to files only, ANDed with conditions. */
   fileTypes: fileTypeFilterSchema.optional(),
+  /** Camera EXIF filter (camera, lens, film simulation), applied to files only. */
+  photo: photoFilterSchema.optional(),
+  /** Show each shot (files sharing a base name) as one item, with the rest in `stack`. */
+  stack: z.boolean().optional(),
 })
 export type SearchFilter = z.infer<typeof searchFilterSchema>
 

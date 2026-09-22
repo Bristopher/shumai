@@ -206,6 +206,25 @@ const route = new Hono<{ Variables: { user: User } }>()
       return c.json({ data: counts })
     },
   )
+  .get(
+    '/folders/:folderId/photo-facets',
+    zValidator('query', z.object({ recursively: z.enum(['true', 'false']).optional() })),
+    async (c) => {
+      const folderId = c.req.param('folderId')
+      const user = c.get('user')
+      const { recursively } = c.req.valid('query')
+
+      await authzService.hasPermission({
+        user,
+        permission: Permission.Read,
+        type: ResourceType.Asset,
+        id: folderId,
+      })
+
+      const facets = await searchService.photoFacets(folderId, recursively === 'true')
+      return c.json({ data: facets })
+    },
+  )
   .get('/folders/:folderId/agentsmd', async (c) => {
     const folderId = c.req.param('folderId')
     const user = c.get('user')
