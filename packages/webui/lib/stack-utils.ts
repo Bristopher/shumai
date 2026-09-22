@@ -14,3 +14,27 @@ export function expandStackIds(items: Pick<AssetInfo, 'id' | 'stack'>[]): string
   }
   return [...ids]
 }
+
+/** True when the item is a stacked card standing for more than one file. */
+export function isStacked(item: Pick<AssetInfo, 'stack'>): boolean {
+  return (item.stack?.members.length ?? 0) > 1
+}
+
+/**
+ * The file ids to delete: plain items as they are, and for stacked cards only the members the
+ * user ticked in the delete dialog (`selected`).
+ */
+export function stackDeleteIds(
+  items: Pick<AssetInfo, 'id' | 'stack'>[],
+  selected: ReadonlySet<string>,
+): string[] {
+  const ids = new Set<string>()
+  for (const item of items) {
+    if (isStacked(item)) {
+      for (const member of item.stack!.members) if (selected.has(member.id)) ids.add(member.id)
+    } else {
+      ids.add(item.id)
+    }
+  }
+  return [...ids]
+}

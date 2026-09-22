@@ -1470,5 +1470,8 @@
   "stack_files": "{count} files",
   "stack_versions_label": "Files in this shot",
   "photo_info_title": "Camera",
-  "date_group_undated": "No date taken"
+  "date_group_undated": "No date taken",
+  "stack_delete_title": "Delete stacked files?",
+  "stack_delete_warning": "These cards are stacks: deleting one deletes all {count} files listed below, not just the one shown. Untick any file you want to keep.",
+  "stack_delete_confirm": "Delete {count} files"
 }

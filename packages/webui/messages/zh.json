@@ -1470,5 +1470,8 @@
   "stack_files": "{count} 个文件",
   "stack_versions_label": "此照片的文件",
   "photo_info_title": "相机",
-  "date_group_undated": "无拍摄日期"
+  "date_group_undated": "无拍摄日期",
+  "stack_delete_title": "删除堆叠的文件？",
+  "stack_delete_warning": "这些卡片是堆叠：删除一张会删除下面列出的全部 {count} 个文件，而不只是显示的那一个。取消勾选要保留的文件。",
+  "stack_delete_confirm": "删除 {count} 个文件"
 }
