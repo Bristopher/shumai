@@ -143,7 +143,9 @@ export default function FileSystemManager({
   const stack = metadata[stackMetadataKey(projectId)] === true
 
   const isCollection = !!collection
-  const isFiltering = filterConditions.length > 0 || isCollection
+  // A camera filter searches subfolders too, like a search: at a project root that holds only
+  // folders ("Chris", "Hari"), picking a camera lists that camera's photos from all of them.
+  const isFiltering = filterConditions.length > 0 || isCollection || !!activePhotoFilter
 
   const {
     fileListLeftSidebarCollapsed: isLeftSidebarCollapsed,

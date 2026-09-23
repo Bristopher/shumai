@@ -1365,6 +1365,54 @@ describe('SearchService — photo browsing (stacks, date taken, camera filter)',
     expect(facets.lens).toEqual([])
   })
 
+  it('counts subfolders on request, narrowed by search conditions, for a collection or a parent folder', async () => {
+    const root = await prisma.asset.findUniqueOrThrow({ where: { id: rootId } })
+    const sub = await prisma.asset.create({
+      data: {
+        name: 'Hari',
+        type: AssetType.folder,
+        projectId: root.projectId,
+        parentId: rootId,
+        status: 'uploaded',
+      },
+    })
+    const shot = await prisma.asset.create({
+      data: {
+        name: 'DSCF1253.JPG',
+        type: AssetType.file,
+        projectId: root.projectId,
+        parentId: sub.id,
+        status: 'processed',
+      },
+    })
+    await prisma.assetMetadataValue.create({
+      data: { assetId: shot.id, fieldKey: 'camera', stringValue: 'FUJIFILM X-S20' },
+    })
+
+    // Only the folder's own files by default: the subfolder's camera is missing.
+    expect((await searchService.photoFacets(rootId)).camera.map((f) => f.value)).not.toContain(
+      'FUJIFILM X-S20',
+    )
+
+    const everything = await searchService.photoFacets(rootId, { recursively: true })
+    expect(everything.camera).toEqual([
+      { value: 'FUJIFILM X100VI', count: 2 },
+      { value: 'FUJIFILM X-S20', count: 1 },
+      { value: 'SONY ILCE-7CM2', count: 1 },
+    ])
+
+    // A collection's conditions narrow the counts to the files it shows.
+    const dscfOnly = await searchService.photoFacets(rootId, {
+      recursively: true,
+      operator: 'AND',
+      conditions: [{ field: 'name', operator: 'contains', value: 'DSCF' }],
+    })
+    expect(dscfOnly.camera).toEqual([
+      { value: 'FUJIFILM X100VI', count: 2 },
+      { value: 'FUJIFILM X-S20', count: 1 },
+    ])
+  })
+
   it('lists the files of a shot from any of them', async () => {
     const members = await searchService.stackMembersOf(ids['DSCF5543.RAF.xmp'])
     expect(members.map((m) => m.name)).toEqual([

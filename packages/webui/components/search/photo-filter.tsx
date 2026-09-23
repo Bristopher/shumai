@@ -5,6 +5,7 @@ import {
   type PhotoFacetValue,
   type PhotoFacets,
   type PhotoFilter as PhotoFilterValue,
+  type SearchCondition,
 } from '@shumai/dtos'
 import { useQuery } from '@tanstack/react-query'
 import { Camera, Layers, Pencil } from 'lucide-react'
@@ -63,10 +64,18 @@ interface PhotoFilterProps {
   teamId: string
   projectId: string
   folderId: string
+  /** The conditions of the search or collection being viewed; choices are counted within them. */
+  conditions?: SearchCondition[]
   disabled?: boolean
 }
 
-export function PhotoFilter({ teamId, projectId, folderId, disabled }: PhotoFilterProps) {
+export function PhotoFilter({
+  teamId,
+  projectId,
+  folderId,
+  conditions = [],
+  disabled,
+}: PhotoFilterProps) {
   const { metadata, setMetadata } = useUserMetadataStore()
   const [open, setOpen] = useState(false)
   const key = photoFilterMetadataKey(projectId)
@@ -76,12 +85,14 @@ export function PhotoFilter({ teamId, projectId, folderId, disabled }: PhotoFilt
   const [naming, setNaming] = useState<string | null>(null)
 
   const { data: facets, isLoading } = useQuery({
-    queryKey: ['photo-facets', folderId],
+    queryKey: ['photo-facets', folderId, conditions],
     enabled: open && !!folderId,
     queryFn: async (): Promise<PhotoFacets> => {
-      const res = await client.api.folders[':folderId']['photo-facets'].$get({
+      // Subfolders count too: picking a value lists matching photos from them (see
+      // FileSystemManager), so the choices match what the listing will show.
+      const res = await client.api.folders[':folderId']['photo-facets'].$post({
         param: { folderId },
-        query: {},
+        json: { recursively: true, operator: 'AND', conditions },
       })
       if (!res.ok) throw new Error('failed to load camera details')
       return (await res.json()).data
@@ -136,6 +147,9 @@ export function PhotoFilter({ teamId, projectId, folderId, disabled }: PhotoFilt
       <PopoverContent className="w-80 p-0" align="start">
         {isLoading && <p className="p-3 text-sm text-muted-foreground">{m.loading()}</p>}
         {empty && <p className="p-3 text-sm text-muted-foreground">{m.photo_filter_empty()}</p>}
+        {facets && !empty && (
+          <p className="px-3 pt-3 text-xs text-muted-foreground">{m.photo_filter_scope()}</p>
+        )}
         {facets &&
           SECTIONS.filter((s) => facets[s.facet].length > 0).map((s, i) => (
             <div key={s.facet}>

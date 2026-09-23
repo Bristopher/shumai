@@ -12,7 +12,7 @@ import {
   updateAgentsMdRequestSchema,
 } from '@shumai/dtos'
 import { listChildrenRequestSchema, updateAssetOrderRequestSchema, AuditAction } from '@shumai/dtos'
-import { searchRequestSchema } from '@shumai/dtos'
+import { photoFacetsRequestSchema, searchRequestSchema } from '@shumai/dtos'
 import type { Prisma } from '@shumai/db'
 import { auditLogService } from '@shumai/core/src/auditLog/auditLog'
 
@@ -221,7 +221,29 @@ const route = new Hono<{ Variables: { user: User } }>()
         id: folderId,
       })
 
-      const facets = await searchService.photoFacets(folderId, recursively === 'true')
+      const facets = await searchService.photoFacets(folderId, {
+        recursively: recursively === 'true',
+      })
+      return c.json({ data: facets })
+    },
+  )
+  // Same counts over the files a search or collection shows: subfolders and its conditions.
+  .post(
+    '/folders/:folderId/photo-facets',
+    zValidator('json', photoFacetsRequestSchema),
+    async (c) => {
+      const folderId = c.req.param('folderId')
+      const user = c.get('user')
+      const req = c.req.valid('json')
+
+      await authzService.hasPermission({
+        user,
+        permission: Permission.Read,
+        type: ResourceType.Asset,
+        id: folderId,
+      })
+
+      const facets = await searchService.photoFacets(folderId, req)
       return c.json({ data: facets })
     },
   )

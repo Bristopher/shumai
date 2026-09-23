@@ -9,7 +9,7 @@ import {
   type PhotoFacet,
   type PhotoFacets,
 } from '@shumai/dtos'
-import { SearchRequest } from '@shumai/dtos'
+import { SearchCondition, SearchRequest } from '@shumai/dtos'
 import { PaginatedData, decodeCursor, encodeCursor, PageInfo } from '@shumai/core/src/pagination'
 import { generateSearchNgrams } from '@shumai/core/src/utils/ngram'
 import { workflowService } from '@shumai/workflow-core'
@@ -566,14 +566,30 @@ export class SearchService {
   }
 
   /**
-   * The camera, lens and film simulation values in a folder, with how many shots (files stacked
-   * by base name) carry each, most common first. Feeds the camera filter's choices.
+   * The camera, lens and film simulation values among a folder's files, with how many shots
+   * (files stacked by base name) carry each, most common first. Feeds the camera filter's choices.
+   * With `recursively` it counts subfolders too, and `conditions` narrows the files the same way a
+   * search or collection does, so the choices match what picking one would list.
    */
-  async photoFacets(folderId: string, recursively = false): Promise<PhotoFacets> {
-    const folderIds = recursively
+  async photoFacets(
+    folderId: string,
+    options: {
+      recursively?: boolean
+      operator?: 'AND' | 'OR'
+      conditions?: SearchCondition[]
+    } = {},
+  ): Promise<PhotoFacets> {
+    const folderIds = options.recursively
       ? await this.assetSvc.getDescendantFolderIds(folderId)
       : [folderId]
     const types = [AssetType.file, AssetType.version_stack]
+    const files = new SqlQueryBuilder()
+      .select(Prisma.sql`a.id`)
+      .from(Prisma.sql`assets a`)
+      .addWhere(Prisma.sql`a.is_deleted = false`)
+      .addWhere(Prisma.sql`a.parent_id = ANY(${folderIds})`)
+      .addWhere(Prisma.sql`a.type = ANY(${types}::"AssetType"[])`)
+      .addSearchConditions(options.operator ?? 'AND', options.conditions ?? [])
     const facetByKey = new Map<string, PhotoFacet>(
       (Object.entries(PHOTO_FACETS) as [PhotoFacet, string][]).map(([facet, key]) => [key, facet]),
     )
@@ -584,9 +600,7 @@ export class SearchService {
         count(DISTINCT (a.parent_id, ${STACK_KEY_SQL})) AS count
       FROM asset_metadata_values v
       JOIN assets a ON a.id = v.asset_id
-      WHERE a.is_deleted = false
-        AND a.parent_id = ANY(${folderIds})
-        AND a.type = ANY(${types}::"AssetType"[])
+      WHERE a.id IN (${files.build()})
         AND v.field_key = ANY(${[...facetByKey.keys()]}::text[])
         AND v.string_value IS NOT NULL
       GROUP BY 1, 2

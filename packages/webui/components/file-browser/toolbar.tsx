@@ -288,6 +288,7 @@ export function FileBrowserToolbar({
           teamId={teamId}
           projectId={projectId}
           folderId={assetId}
+          conditions={filterConditions}
           disabled={isRecentlyDeleted || isRecents}
         />
 

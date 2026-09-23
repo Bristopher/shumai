@@ -71,3 +71,14 @@ export type SearchFilter = z.infer<typeof searchFilterSchema>
 
 export const searchRequestSchema = searchFilterSchema.extend(paginationParamsSchema.shape)
 export type SearchRequest = z.infer<typeof searchRequestSchema>
+
+/**
+ * Which files the camera filter's choices are counted over: a folder, optionally with its
+ * subfolders, narrowed by the same conditions as the search or collection being viewed.
+ */
+export const photoFacetsRequestSchema = z.object({
+  recursively: z.boolean().optional().default(false),
+  operator: searchOperatorSchema.optional().default('AND'),
+  conditions: z.array(searchConditionSchema).optional().default([]),
+})
+export type PhotoFacetsRequest = z.infer<typeof photoFacetsRequestSchema>
