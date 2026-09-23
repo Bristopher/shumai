@@ -81,7 +81,10 @@ export function RecipeNameDialog({ projectId, settings, onClose }: RecipeNameDia
         {settings && (
           <div className="flex flex-wrap gap-1" data-testid="recipe-settings">
             {recipeParts(settings).map((part) => (
-              <span key={part} className="rounded border px-1.5 py-0.5 text-xs text-muted-foreground">
+              <span
+                key={part}
+                className="rounded border px-1.5 py-0.5 text-xs text-muted-foreground"
+              >
                 {part}
               </span>
             ))}

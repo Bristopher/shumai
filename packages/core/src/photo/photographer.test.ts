@@ -20,8 +20,8 @@ describe('PhotographerService', () => {
 
   const photographerOf = async (assetId: string) =>
     (
-      await prisma.assetMetadataValue.findUnique({
-        where: { assetId_fieldKey: { assetId, fieldKey } },
+      await prisma.assetMetadataValue.findFirst({
+        where: { assetId, fieldKey },
       })
     )?.stringValue ?? null
 
