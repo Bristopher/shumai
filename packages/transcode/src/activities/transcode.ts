@@ -6,7 +6,12 @@ import { getDerivedArtifactDirectory, stemFromKey } from '@shumai/core/src/utils
 import { gotenbergService } from '@shumai/core/src/gotenberg/gotenberg'
 import { parseCsvContent } from '@shumai/core/src/transcode/transcode'
 import { classifyXmp, isXmpSidecar, pickXmpSource } from '@shumai/core/src/utils/xmp-sidecar'
-import { photoExifMetadata, readPhotoExifFromFile } from '@shumai/core/src/utils/photo-exif'
+import {
+  photoExifMetadata,
+  readPhotoExifFromFile,
+  readXmpCreatorFromFile,
+} from '@shumai/core/src/utils/photo-exif'
+import { photographerService } from '@shumai/core/src/photo/photographer'
 import {
   getProxyType,
   isCsvDocument,
@@ -84,6 +89,8 @@ export async function getMediaInfoActivity(params: {
   mediaType?: string
   /** The file to read camera EXIF from when `filePath` is a render (an XMP sidecar's photo). */
   exifSourcePath?: string
+  /** The file whose XMP Creator names the photographer when `filePath` is a render (the sidecar). */
+  creatorSourcePath?: string
 }): Promise<PrismaJson.MediaInfo> {
   try {
     const proxyType =
@@ -120,6 +127,8 @@ export async function getMediaInfoActivity(params: {
       },
     }
 
+    // Who took it: Lightroom's Creator in the file's own XMP wins over the camera's EXIF Artist.
+    let photographer: string | undefined
     const metadataUpdates: { key: string; value: string | number }[] = [
       { key: 'file_type', value: fileType },
     ]
@@ -207,10 +216,13 @@ export async function getMediaInfoActivity(params: {
         hasAudio: false,
         format: {},
       }
+      const exif = readPhotoExifFromFile(params.exifSourcePath ?? params.filePath)
+      photographer =
+        readXmpCreatorFromFile(params.creatorSourcePath ?? params.filePath) ?? exif?.artist
       metadataUpdates.push(
         { key: 'resolution_width', value: info.originalWidth },
         { key: 'resolution_height', value: info.originalHeight },
-        ...photoExifMetadata(readPhotoExifFromFile(params.exifSourcePath ?? params.filePath)),
+        ...photoExifMetadata({ ...exif, artist: photographer }),
       )
     } else if (isPdf) {
       const info = await transcodeService.getPdfInfo(params.filePath)
@@ -234,6 +246,12 @@ export async function getMediaInfoActivity(params: {
     }
 
     await metadataService.updateAssetMetadata(params.assetId, metadataUpdates, true)
+    if (photographer) {
+      // Best effort: a missing or odd Photographer field must not fail the transcode.
+      await photographerService.fillFromName(params.assetId, photographer).catch((err) => {
+        logger.warn({ err, assetId: params.assetId }, 'Photographer fill failed')
+      })
+    }
 
     return mediaInfo
   } catch (err) {

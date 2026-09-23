@@ -34,6 +34,8 @@ export interface PhotoExif {
    * `describeFujiRecipe`). Photos taken with the same recipe share it exactly.
    */
   fujiRecipe?: string
+  /** Who took it: EXIF Artist, which Fujifilm cameras fill from Copyright Info > Author. */
+  artist?: string
 }
 
 const MAX_IFD_ENTRIES = 512
@@ -43,6 +45,7 @@ const MAX_JPEG_SEGMENTS = 64
 const TAG_MAKE = 0x010f
 const TAG_MODEL = 0x0110
 const TAG_DATETIME = 0x0132
+const TAG_ARTIST = 0x013b
 const TAG_EXIF_IFD = 0x8769
 const TAG_EXPOSURE_TIME = 0x829a
 const TAG_F_NUMBER = 0x829d
@@ -411,6 +414,7 @@ function readTiffExif(src: ByteSource, base: number): PhotoExif | null {
   const out: PhotoExif = {
     make: readString(t, find(top, TAG_MAKE)),
     model: readString(t, find(top, TAG_MODEL)),
+    artist: readString(t, find(top, TAG_ARTIST)),
   }
   let dateTime = readString(t, find(top, TAG_DATETIME))
 
@@ -516,6 +520,7 @@ export function photoExifMetadata(
   const shutter = formatShutterSpeed(exif.exposureTime)
   if (shutter) updates.push({ key: 'shutter_speed', value: shutter })
   if (exif.iso) updates.push({ key: 'iso', value: exif.iso })
+  if (exif.artist) updates.push({ key: 'artist', value: exif.artist })
   return updates
 }
 
@@ -530,4 +535,55 @@ export const PHOTO_EXIF_FIELD_KEYS = [
   'aperture',
   'shutter_speed',
   'iso',
+  'artist',
 ] as const
+
+const XML_ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+}
+
+function decodeXml(s: string): string {
+  return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (whole, e: string) => {
+    if (e[0] === '#') {
+      const code = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10)
+      return Number.isFinite(code) && code > 0 && code < 0x110000 ? String.fromCodePoint(code) : ''
+    }
+    return XML_ENTITIES[e.toLowerCase()] ?? whole
+  })
+}
+
+/**
+ * The first creator in an XMP packet (`dc:creator`), which Lightroom calls Creator and writes to
+ * `.xmp` sidecars and into exported JPEGs. Undefined when there is none or it is blank.
+ */
+export function readXmpCreator(xmp: string): string | undefined {
+  const block = /<dc:creator\b[^>]*>([\s\S]*?)<\/dc:creator>/i.exec(xmp)?.[1]
+  const raw = block
+    ? (/<rdf:li\b[^>]*>([\s\S]*?)<\/rdf:li>/i.exec(block)?.[1] ?? block)
+    : /\bdc:creator\s*=\s*"([^"]*)"/i.exec(xmp)?.[1]
+  const name = raw && decodeXml(raw.replace(/<[^>]*>/g, '')).trim()
+  return name ? name.slice(0, MAX_STRING) : undefined
+}
+
+/** How much of a file to scan for an XMP packet: sidecars are small, and JPEGs keep it up front. */
+const XMP_SCAN_BYTES = 1024 * 1024
+
+/** `readXmpCreator` over the start of a file (an `.xmp` sidecar or a JPEG). Never throws. */
+export function readXmpCreatorFromFile(filePath: string): string | undefined {
+  let fd: number | undefined
+  try {
+    fd = fs.openSync(filePath, 'r')
+    const buf = Buffer.alloc(XMP_SCAN_BYTES)
+    const n = fs.readSync(fd, buf, 0, XMP_SCAN_BYTES, 0)
+    const text = buf.subarray(0, n).toString('utf8')
+    return text.includes('dc:creator') ? readXmpCreator(text) : undefined
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd)
+  }
+}

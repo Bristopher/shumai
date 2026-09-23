@@ -254,6 +254,13 @@ export const systemFields: Prisma.MetadataFieldCreateInput[] = [
     config: { name: 'ISO', type: 'number', number: { scale: 0 } },
   },
   {
+    // EXIF Artist (the camera's Copyright Info > Author) or XMP dc:creator (Lightroom's Creator).
+    key: 'artist',
+    scope: 'SYSTEM',
+    readOnly: true,
+    config: { name: 'Artist / Creator', type: 'text', text: {} },
+  },
+  {
     key: 'status',
     scope: 'SYSTEM',
     readOnly: false,

@@ -6,6 +6,7 @@ import {
   formatShutterSpeed,
   photoExifMetadata,
   readPhotoExifFromBuffer,
+  readXmpCreator,
 } from './photo-exif'
 
 // --- a tiny little-endian TIFF/EXIF writer ------------------------------------------------------
@@ -297,5 +298,52 @@ describe('photo EXIF helpers', () => {
       { key: 'iso', value: 250 },
     ])
     expect(photoExifMetadata(null)).toEqual([])
+  })
+
+  it('reads the photographer from EXIF Artist, and treats a blank Author as none', () => {
+    const named = tiff(
+      [
+        { tag: 0x010f, value: { ascii: 'FUJIFILM' } },
+        { tag: 0x0110, value: { ascii: 'X-S20' } },
+        { tag: 0x013b, value: { ascii: 'Hari Babaria' } },
+      ],
+      [],
+    )
+    const exif = readPhotoExifFromBuffer(named, 'DSCF1499.JPG')
+    expect(exif?.artist).toBe('Hari Babaria')
+    expect(photoExifMetadata(exif)).toContainEqual({ key: 'artist', value: 'Hari Babaria' })
+
+    // Fujifilm writes the tag even when no Author is set, as padding.
+    const blank = tiff(
+      [
+        { tag: 0x010f, value: { ascii: 'FUJIFILM' } },
+        { tag: 0x013b, value: { ascii: '        ' } },
+      ],
+      [],
+    )
+    expect(readPhotoExifFromBuffer(blank)?.artist).toBeUndefined()
+  })
+})
+
+describe('readXmpCreator', () => {
+  it("reads Lightroom's Creator from a sidecar's dc:creator list", () => {
+    const xmp = `<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF><rdf:Description rdf:about=""
+      xmlns:dc="http://purl.org/dc/elements/1.1/">
+      <dc:creator><rdf:Seq><rdf:li>Christopher Buzicky</rdf:li><rdf:li>Second</rdf:li></rdf:Seq></dc:creator>
+      </rdf:Description></rdf:RDF></x:xmpmeta>`
+    expect(readXmpCreator(xmp)).toBe('Christopher Buzicky')
+  })
+
+  it('reads the attribute form and decodes XML entities', () => {
+    expect(readXmpCreator('<rdf:Description dc:creator="Tom &amp; Jerry &#233;"/>')).toBe(
+      'Tom & Jerry é',
+    )
+  })
+
+  it('returns nothing without a creator or with a blank one', () => {
+    expect(readXmpCreator('<x:xmpmeta><rdf:RDF/></x:xmpmeta>')).toBeUndefined()
+    expect(
+      readXmpCreator('<dc:creator><rdf:Seq><rdf:li>  </rdf:li></rdf:Seq></dc:creator>'),
+    ).toBeUndefined()
   })
 })
