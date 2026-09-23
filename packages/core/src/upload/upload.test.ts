@@ -916,6 +916,80 @@ describe('UploadService', () => {
     })
   })
 
+  describe('abandonStaleUploads', () => {
+    const HOUR = 60 * 60 * 1000
+    const daysAgo = (days: number) => new Date(Date.now() - days * 24 * HOUR)
+
+    const uploadTask = (name: string, status: TaskStatus = TaskStatus.pending) =>
+      prisma.task.create({ data: { creatorId: userId, type: 'upload', name, total: 2, status } })
+
+    const placeholder = async (
+      name: string,
+      taskId: string,
+      status: AssetStatus = AssetStatus.uploading,
+    ) => {
+      const storageKey = await prisma.storageKey.create({ data: { key: `files/stale/${name}` } })
+      return prisma.asset.create({
+        data: {
+          name,
+          type: AssetType.file,
+          projectId,
+          parentId,
+          storageKeyId: storageKey.id,
+          taskId,
+          status,
+        },
+      })
+    }
+
+    const age = async (table: 'assets' | 'tasks', id: string, when: Date) => {
+      if (table === 'assets') {
+        await prisma.$executeRaw`UPDATE assets SET updated_at = ${when} WHERE id = ${id}`
+      } else {
+        await prisma.$executeRaw`UPDATE tasks SET updated_at = ${when} WHERE id = ${id}`
+      }
+    }
+
+    it('discards files of an upload that stopped a day ago and fails its task', async () => {
+      const task = await uploadTask('stopped')
+      const done = await placeholder('done.jpg', task.id, AssetStatus.uploaded)
+      const stuck = await placeholder('huge.mov', task.id)
+      for (const id of [done.id, stuck.id]) await age('assets', id, daysAgo(2))
+      await age('tasks', task.id, daysAgo(2))
+
+      expect(await uploadService.abandonStaleUploads(24)).toEqual({ files: 1, tasks: 1 })
+
+      expect(await prisma.asset.findUnique({ where: { id: stuck.id } })).toBeNull()
+      expect(await prisma.asset.findUnique({ where: { id: done.id } })).not.toBeNull()
+      expect(s3Service.deleteObject).toHaveBeenCalledWith(expect.anything(), 'files/stale/huge.mov')
+      const after = await prisma.task.findUnique({ where: { id: task.id } })
+      expect(after?.status).toBe(TaskStatus.failed)
+    })
+
+    it('leaves an old file alone while its task is still making progress', async () => {
+      const task = await uploadTask('busy', TaskStatus.uploading)
+      const waiting = await placeholder('queued.raf', task.id)
+      await age('assets', waiting.id, daysAgo(2))
+
+      expect(await uploadService.abandonStaleUploads(24)).toEqual({ files: 0, tasks: 0 })
+      expect(await prisma.asset.findUnique({ where: { id: waiting.id } })).not.toBeNull()
+    })
+
+    it('fails an idle task that never got any files', async () => {
+      const empty = await uploadTask('empty')
+      const fresh = await uploadTask('fresh')
+      await age('tasks', empty.id, daysAgo(3))
+
+      expect(await uploadService.abandonStaleUploads(24)).toEqual({ files: 0, tasks: 1 })
+      expect((await prisma.task.findUnique({ where: { id: empty.id } }))?.status).toBe(
+        TaskStatus.failed,
+      )
+      expect((await prisma.task.findUnique({ where: { id: fresh.id } }))?.status).toBe(
+        TaskStatus.pending,
+      )
+    })
+  })
+
   describe('confirmFileUpload with errorMessage', () => {
     it('should abort multipart upload in S3 and delete asset on failure', async () => {
       const task = await prisma.task.create({

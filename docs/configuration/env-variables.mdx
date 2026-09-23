@@ -17,10 +17,11 @@ Shumai is configured via environment variables. You can define these variables i
 
 ## Server Config
 
-| Variable                | Description                                                                                       | Example / Default |
-| :---------------------- | :------------------------------------------------------------------------------------------------ | :---------------- |
-| `SHUMAI_SERVER_PORT`    | The port on which the Shumai web server will listen.                                              | `3000` (default)  |
-| `MAX_REQUEST_BODY_SIZE` | Maximum allowed size for request bodies (e.g., for large file uploads). Default is 10GB in bytes. | `10737418240`     |
+| Variable                   | Description                                                                                                                                                                                       | Example / Default               |
+| :------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :------------------------------ |
+| `SHUMAI_SERVER_PORT`       | The port on which the Shumai web server will listen.                                                                                                                                              | `3000` (default)                |
+| `MAX_REQUEST_BODY_SIZE`    | Largest single request body in bytes. The web uploader sends files over 100 MB in parts, so this only limits clients that upload a file in one request.                                           | `21474836480` (default, 20 GiB) |
+| `UPLOAD_STALE_AFTER_HOURS` | Hours an upload can go without progress before Shumai gives up on it, removes its unfinished files and marks the upload failed. Covers clients that crash, go offline or are rejected mid-upload. | `24` (default)                  |
 
 ---
 

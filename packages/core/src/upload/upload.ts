@@ -468,7 +468,6 @@ export class UploadService {
     taskId: string,
     req: AbortUploadRequest,
   ): Promise<AbortUploadResponse> {
-    const bucket = process.env.S3_BUCKET || 'shumai'
     const asset = await this.prismaClient.asset.findUnique({
       where: { id: req.fileId },
       include: {
@@ -498,10 +497,42 @@ export class UploadService {
       throw new Error('Provided key does not match asset storage key')
     }
 
-    const uploadId = asset.uploadId || req.uploadId
     if (asset.uploadId && req.uploadId && asset.uploadId !== req.uploadId) {
       throw new Error('Provided uploadId does not match asset uploadId')
     }
+
+    await this.discardUpload(asset, req.uploadId)
+
+    if (taskId) {
+      const remaining = await this.prismaClient.asset.count({
+        where: { taskId, status: AssetStatus.uploading },
+      })
+      if (remaining === 0) {
+        await this.prismaClient.task
+          .update({
+            where: { id: taskId },
+            data: { status: TaskStatus.failed },
+          })
+          .catch(() => {})
+      }
+    }
+
+    return { success: true }
+  }
+
+  /** Removes an unfinished upload: its partial data in storage, its placeholder asset and its key. */
+  private async discardUpload(
+    asset: {
+      id: string
+      uploadId: string | null
+      storageKeyId: string | null
+      storageKey: { key: string } | null
+    },
+    requestUploadId?: string,
+  ): Promise<void> {
+    const bucket = process.env.S3_BUCKET || 'shumai'
+    const key = asset.storageKey?.key
+    const uploadId = asset.uploadId || requestUploadId
 
     if (uploadId && key) {
       try {
@@ -525,23 +556,87 @@ export class UploadService {
         .delete({ where: { id: asset.storageKeyId } })
         .catch(() => {})
     }
+  }
 
-    if (taskId) {
-      const remaining = await this.prismaClient.asset.count({
-        where: { taskId, status: AssetStatus.uploading },
-      })
-      if (remaining === 0) {
-        await this.prismaClient.task
-          .update({
-            where: { id: taskId },
-            data: { status: TaskStatus.failed },
-          })
-          .catch(() => {})
-      }
+  /**
+   * Gives up on uploads nobody is finishing. A client that crashes, goes offline or is turned away by
+   * the server (for example a body over MAX_REQUEST_BODY_SIZE) never confirms or aborts its files, so
+   * their placeholders and the task would otherwise show "Uploading" forever. A file counts as
+   * abandoned once neither it nor its task has changed for `olderThanHours`; it is discarded the same
+   * way an abort would, and a task left with nothing uploading is marked failed.
+   */
+  async abandonStaleUploads(
+    olderThanHours = staleUploadHours(),
+    now = new Date(),
+  ): Promise<{ files: number; tasks: number }> {
+    const cutoff = new Date(now.getTime() - olderThanHours * 60 * 60 * 1000)
+
+    const stale = await this.prismaClient.asset.findMany({
+      where: {
+        status: AssetStatus.uploading,
+        updatedAt: { lt: cutoff },
+        OR: [{ taskId: null }, { task: { updatedAt: { lt: cutoff } } }],
+      },
+      select: {
+        id: true,
+        uploadId: true,
+        storageKeyId: true,
+        storageKey: { select: { key: true } },
+      },
+      take: STALE_UPLOAD_BATCH,
+    })
+    for (const asset of stale) {
+      await this.discardUpload(asset)
     }
 
-    return { success: true }
+    const failed = await this.prismaClient.task.updateMany({
+      where: {
+        type: 'upload',
+        status: { in: [TaskStatus.pending, TaskStatus.uploading] },
+        updatedAt: { lt: cutoff },
+        assets: { none: { status: AssetStatus.uploading } },
+      },
+      data: { status: TaskStatus.failed },
+    })
+
+    if (stale.length > 0 || failed.count > 0) {
+      logger.info(
+        { files: stale.length, tasks: failed.count, olderThanHours },
+        'Abandoned stale uploads',
+      )
+    }
+    return { files: stale.length, tasks: failed.count }
   }
+
+  private staleUploadTimer: ReturnType<typeof setTimeout> | null = null
+
+  startStaleUploadSweep(intervalMs = STALE_UPLOAD_SWEEP_MS) {
+    if (this.staleUploadTimer) return
+    const run = async () => {
+      try {
+        await this.abandonStaleUploads()
+      } catch (err) {
+        logger.error({ err }, 'Stale upload sweep failed')
+      }
+      if (this.staleUploadTimer) this.staleUploadTimer = setTimeout(run, intervalMs)
+    }
+    this.staleUploadTimer = setTimeout(run, 0)
+  }
+
+  stopStaleUploadSweep() {
+    if (this.staleUploadTimer) clearTimeout(this.staleUploadTimer)
+    this.staleUploadTimer = null
+  }
+}
+
+const DEFAULT_STALE_UPLOAD_HOURS = 24
+const STALE_UPLOAD_BATCH = 500
+const STALE_UPLOAD_SWEEP_MS = 15 * 60 * 1000
+
+/** Hours without progress before an upload counts as abandoned (UPLOAD_STALE_AFTER_HOURS, default 24). */
+export function staleUploadHours(): number {
+  const hours = Number(process.env.UPLOAD_STALE_AFTER_HOURS)
+  return Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_STALE_UPLOAD_HOURS
 }
 
 export const uploadService = new UploadService()
