@@ -8,6 +8,7 @@ import index from '@shumai/webui/index.html'
 import { initAgentWorkflows } from '@shumai/agent'
 import { app } from '@shumai/api'
 import { assetService } from '@shumai/core/src/asset/asset'
+import { uploadService } from '@shumai/core/src/upload/upload'
 import { metadataService } from '@shumai/core/src/metadata/metadata'
 import { initTranscodeWorkflows } from '@shumai/transcode'
 import { workflowService } from '@shumai/workflow-core'
@@ -60,6 +61,7 @@ async function run() {
   await migrateLegacyAgentAvatars().catch(console.error)
   assetService.startCleanupJob()
   notificationJobService.start()
+  uploadService.startStaleUploadSweep()
   workflowService.start()
   if (process.env.WORKFLOW_EXECUTOR === 'temporal') {
     const args = process.argv.slice(2)
@@ -183,6 +185,7 @@ async function run() {
   const shutdown = () => {
     console.log('\nShutting down gracefully...')
     assetService.stopCleanupJob()
+    uploadService.stopStaleUploadSweep()
     server.stop(true)
     process.exit(0)
   }
