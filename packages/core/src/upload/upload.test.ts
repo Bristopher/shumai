@@ -3,7 +3,7 @@ import { prisma } from '@shumai/db'
 import { setupTestDbHooks } from '@shumai/db/test'
 import { uploadService } from './upload'
 import { gotenbergService } from '@shumai/core/src/gotenberg/gotenberg'
-import { s3Service } from '@shumai/core/src/s3/s3'
+import { getStorageBackend, s3Service } from '@shumai/core/src/s3/s3'
 import { AssetStatus, AssetType, TaskStatus, WorkflowTaskType } from '@shumai/db'
 
 vi.mock('@shumai/core/src/s3/s3', () => ({
@@ -913,6 +913,52 @@ describe('UploadService', () => {
         where: { id: asset.id },
       })
       expect(deletedAsset).toBeNull()
+    })
+  })
+
+  describe('files over the request body limit', () => {
+    const GIB = 1024 ** 3
+    const file = (name: string, size: number) => ({
+      name,
+      id: name,
+      size,
+      type: 'file' as const,
+      mediaType: 'video/quicktime',
+      children: [],
+    })
+
+    it('refuses the whole upload with local storage, naming the files, before creating anything', async () => {
+      vi.mocked(getStorageBackend).mockReturnValue('local')
+      try {
+        await expect(
+          uploadService.createUploadTask(userId, {
+            parentId,
+            files: [
+              file('small.mov', GIB),
+              {
+                ...file('trip', 0),
+                type: 'folder' as const,
+                children: [file('DSCF1253.MOV', 26_762_885_120)],
+              },
+            ],
+          }),
+        ).rejects.toMatchObject({
+          status: 413,
+          message: expect.stringContaining('DSCF1253.MOV (24.9 GiB)'),
+        })
+        expect(await prisma.task.count()).toBe(0)
+        expect(await prisma.asset.count({ where: { name: 'small.mov' } })).toBe(0)
+      } finally {
+        vi.mocked(getStorageBackend).mockReturnValue('s3')
+      }
+    })
+
+    it('lets the same file through to S3, which uploads it in parts', async () => {
+      const res = await uploadService.createUploadTask(userId, {
+        parentId,
+        files: [file('DSCF1253.MOV', 26_762_885_120)],
+      })
+      expect(res.createdAssets).toHaveLength(1)
     })
   })
 

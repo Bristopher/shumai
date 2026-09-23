@@ -21,6 +21,7 @@ import { gotenbergService } from '@shumai/core/src/gotenberg/gotenberg'
 import { sanitizeFilename } from '@shumai/core/src/utils/filename'
 import { getProxyType, isHtmlDocument, isOfficeDocument } from '@shumai/core/src/utils/mime'
 import { logger } from '@shumai/core/src/logger'
+import { HTTPException } from 'hono/http-exception'
 
 export class UploadService {
   constructor(private readonly prismaClient: typeof prisma = prisma) {}
@@ -45,6 +46,7 @@ export class UploadService {
       }
     }
     countTotalFiles(req.files)
+    this.rejectFilesOverBodyLimit(req.files)
 
     const task = await this.prismaClient.task.create({
       data: {
@@ -520,6 +522,31 @@ export class UploadService {
     return { success: true }
   }
 
+  /**
+   * With local storage every file arrives as one request, so a file over MAX_REQUEST_BODY_SIZE can
+   * never get through: the server answers 413 and closes the connection while the client is still
+   * sending, which the client only sees as a reset. Refuse it here, before any placeholder is made.
+   */
+  private rejectFilesOverBodyLimit(files: FileNode[]) {
+    if (getStorageBackend() !== 'local') return
+    const limit = maxRequestBodySize()
+    const tooBig: FileNode[] = []
+    const walk = (nodes: FileNode[]) => {
+      for (const node of nodes) {
+        if (node.type === 'file' && node.size > limit) tooBig.push(node)
+        else if (node.children) walk(node.children)
+      }
+    }
+    walk(files)
+    if (tooBig.length === 0) return
+    const gib = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GiB`
+    throw new HTTPException(413, {
+      message: `Too large to upload (limit ${gib(limit)}, set by MAX_REQUEST_BODY_SIZE): ${tooBig
+        .map((f) => `${f.name} (${gib(f.size)})`)
+        .join(', ')}`,
+    })
+  }
+
   /** Removes an unfinished upload: its partial data in storage, its placeholder asset and its key. */
   private async discardUpload(
     asset: {
@@ -627,6 +654,14 @@ export class UploadService {
     if (this.staleUploadTimer) clearTimeout(this.staleUploadTimer)
     this.staleUploadTimer = null
   }
+}
+
+const DEFAULT_MAX_REQUEST_BODY_SIZE = 20 * 1024 * 1024 * 1024
+
+/** Largest request body the server accepts, in bytes (MAX_REQUEST_BODY_SIZE, default 20 GiB). */
+export function maxRequestBodySize(): number {
+  const bytes = parseInt(process.env.MAX_REQUEST_BODY_SIZE || '', 10)
+  return Number.isFinite(bytes) && bytes > 0 ? bytes : DEFAULT_MAX_REQUEST_BODY_SIZE
 }
 
 const DEFAULT_STALE_UPLOAD_HOURS = 24
