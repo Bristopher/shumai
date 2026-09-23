@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 * **kanban**: Related assets on a task are now clickable, taking you directly to that file or folder in its project
 
 ### Fixed
+* **upload**: Fix uploads staying at "Uploading" forever when the client disconnects or crashes: uploads that make no progress for 24 hours (`UPLOAD_STALE_AFTER_HOURS`) are now discarded and their upload task marked failed, and on local storage files larger than `MAX_REQUEST_BODY_SIZE` are refused up front with a clear error instead of failing as a connection reset
 
 ### Changed
 
