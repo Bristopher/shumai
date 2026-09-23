@@ -8,6 +8,7 @@ import index from '@shumai/webui/index.html'
 import { initAgentWorkflows } from '@shumai/agent'
 import { app } from '@shumai/api'
 import { assetService } from '@shumai/core/src/asset/asset'
+import { maxRequestBodySize, uploadService } from '@shumai/core/src/upload/upload'
 import { metadataService } from '@shumai/core/src/metadata/metadata'
 import { initTranscodeWorkflows } from '@shumai/transcode'
 import { workflowService } from '@shumai/workflow-core'
@@ -58,6 +59,7 @@ async function run() {
   await metadataService.syncSystemFields().catch(console.error)
   await migrateLegacyAgentAvatars().catch(console.error)
   assetService.startCleanupJob()
+  uploadService.startStaleUploadSweep()
   workflowService.start()
   if (process.env.WORKFLOW_EXECUTOR === 'temporal') {
     const args = process.argv.slice(2)
@@ -168,9 +170,7 @@ async function run() {
   const server = Bun.serve({
     port,
     idleTimeout: 120,
-    maxRequestBodySize: process.env.MAX_REQUEST_BODY_SIZE
-      ? parseInt(process.env.MAX_REQUEST_BODY_SIZE)
-      : 1024 * 1024 * 1024 * 20, // Default 20GB
+    maxRequestBodySize: maxRequestBodySize(),
     development: !isProd,
     fetch: app.fetch,
     routes,
@@ -181,6 +181,7 @@ async function run() {
   const shutdown = () => {
     console.log('\nShutting down gracefully...')
     assetService.stopCleanupJob()
+    uploadService.stopStaleUploadSweep()
     server.stop(true)
     process.exit(0)
   }
