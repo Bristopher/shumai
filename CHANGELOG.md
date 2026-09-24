@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+### Fixed
+
+### Changed
+
+## [0.4.8] - 2026-09-24
+
+### Added
+
 - **transcode**: Add HDR video proxy support: HDR videos automatically generate HDR video proxies and preview videos preserving HDR color characteristics, tone-mapped SDR thumbnails and posters, and automatic HDR player playback on supported displays with hardware EDR acceleration
 - **docs**: Add a Changelog section to the documentation site so users can explore release notes and updates directly in Mintlify
 
