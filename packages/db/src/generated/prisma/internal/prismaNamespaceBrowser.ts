@@ -68,6 +68,7 @@ export const ModelName = {
   WatermarkFile: 'WatermarkFile',
   Asset: 'Asset',
   StorageKey: 'StorageKey',
+  StorageCatalogQueue: 'StorageCatalogQueue',
   AssetMetadataValue: 'AssetMetadataValue',
   AssetAgentMd: 'AssetAgentMd',
   AssetComment: 'AssetComment',
@@ -372,6 +373,14 @@ export const StorageKeyScalarFieldEnum = {
 } as const
 
 export type StorageKeyScalarFieldEnum = (typeof StorageKeyScalarFieldEnum)[keyof typeof StorageKeyScalarFieldEnum]
+
+
+export const StorageCatalogQueueScalarFieldEnum = {
+  id: 'id',
+  queuedAt: 'queuedAt'
+} as const
+
+export type StorageCatalogQueueScalarFieldEnum = (typeof StorageCatalogQueueScalarFieldEnum)[keyof typeof StorageCatalogQueueScalarFieldEnum]
 
 
 export const AssetMetadataValueScalarFieldEnum = {

@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **storage**: Add an optional storage catalog (`STORAGE_CATALOG_ENABLED`): Shumai keeps a small record of every project, folder, file and its metadata next to your files, updated within seconds of any change, and the new `shumai restore-catalog` command rebuilds your library from it if the database is ever lost
+
 ### Fixed
 
 ### Changed

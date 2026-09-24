@@ -600,6 +600,17 @@ model StorageKey {
   @@map("storage_keys")
 }
 
+/// Library changes waiting to be mirrored into storage as catalog/*.json by StorageCatalogService.
+/// Filled by database triggers on assets, asset_metadata_values, projects and metadata_fields
+/// (see migration add_storage_catalog_queue). id is an asset id, 'project:<id>' or 'field:<key>'.
+model StorageCatalogQueue {
+  id       String   @id
+  queuedAt DateTime @default(now()) @map("queued_at")
+
+  @@index([queuedAt])
+  @@map("storage_catalog_queue")
+}
+
 model AssetMetadataValue {
   id           String   @id @default(ulid())
   assetId      String   @map("asset_id")
