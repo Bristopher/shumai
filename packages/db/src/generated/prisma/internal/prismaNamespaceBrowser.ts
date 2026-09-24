@@ -69,6 +69,7 @@ export const ModelName = {
   Asset: 'Asset',
   StorageKey: 'StorageKey',
   StorageCatalogQueue: 'StorageCatalogQueue',
+  StorageCatalogState: 'StorageCatalogState',
   AssetMetadataValue: 'AssetMetadataValue',
   AssetAgentMd: 'AssetAgentMd',
   AssetComment: 'AssetComment',
@@ -381,6 +382,19 @@ export const StorageCatalogQueueScalarFieldEnum = {
 } as const
 
 export type StorageCatalogQueueScalarFieldEnum = (typeof StorageCatalogQueueScalarFieldEnum)[keyof typeof StorageCatalogQueueScalarFieldEnum]
+
+
+export const StorageCatalogStateScalarFieldEnum = {
+  id: 'id',
+  lastSeq: 'lastSeq',
+  snapshotSeq: 'snapshotSeq',
+  snapshotBytes: 'snapshotBytes',
+  logSegments: 'logSegments',
+  logBytes: 'logBytes',
+  updatedAt: 'updatedAt'
+} as const
+
+export type StorageCatalogStateScalarFieldEnum = (typeof StorageCatalogStateScalarFieldEnum)[keyof typeof StorageCatalogStateScalarFieldEnum]
 
 
 export const AssetMetadataValueScalarFieldEnum = {

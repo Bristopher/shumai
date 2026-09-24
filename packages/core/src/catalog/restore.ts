@@ -2,11 +2,11 @@ import path from 'node:path'
 import { AssetStatus, AssetType, MetadataFieldScope, prisma, Prisma } from '@shumai/db'
 import { s3Service } from '@shumai/core/src/s3/s3'
 import {
-  CATALOG_PREFIX,
+  catalogBucket,
   CatalogAssetRecord,
   CatalogFieldRecord,
   CatalogProjectRecord,
-  CatalogRecord,
+  readCatalog,
 } from './catalog'
 
 export interface RestoreOptions {
@@ -34,9 +34,7 @@ export interface RestoreReport {
 
 const READ_CONCURRENCY = 16
 
-function bucket(): string {
-  return process.env.S3_BUCKET || 'shumai'
-}
+const bucket = catalogBucket
 
 async function runLimited<T>(items: T[], limit: number, fn: (item: T) => Promise<void>) {
   let next = 0
@@ -49,7 +47,7 @@ async function runLimited<T>(items: T[], limit: number, fn: (item: T) => Promise
 
 /**
  * Rebuilds projects, metadata fields, folders, files, tags and trash state in this database from the
- * storage catalog (catalog/*.json written by StorageCatalogService). Objects that already exist are left
+ * storage catalog (snapshot + log written by StorageCatalogService). Objects that already exist are left
  * alone, so the restore can be run again after fixing a problem.
  */
 export async function restoreFromCatalog(options: RestoreOptions = {}): Promise<RestoreReport> {
@@ -65,20 +63,14 @@ export async function restoreFromCatalog(options: RestoreOptions = {}): Promise<
     orphans: [],
   }
 
-  const keys = (await s3Service.listObjects(bucket(), CATALOG_PREFIX)).filter((k) =>
-    k.endsWith('.json'),
-  )
-  const records: CatalogRecord[] = []
-  await runLimited(keys, READ_CONCURRENCY, async (key) => {
-    try {
-      const { buffer } = await s3Service.getObject(bucket(), key)
-      records.push(JSON.parse(buffer.toString('utf8')) as CatalogRecord)
-    } catch {
-      report.unreadable.push(key)
-    }
-  })
+  const catalog = await readCatalog()
+  const records = catalog.records
   report.records = records.length
-  log(`Read ${records.length} catalog records (${report.unreadable.length} unreadable)`)
+  report.unreadable = catalog.unreadable
+  log(
+    `Read ${records.length} catalog records from snapshot ${catalog.snapshotSeq ?? 'none'} and ` +
+      `${catalog.logSegments} log segments (${catalog.unreadable.length} unreadable)`,
+  )
 
   const fields = records.filter((r): r is CatalogFieldRecord => r.kind === 'metadataField')
   const projects = records.filter((r): r is CatalogProjectRecord => r.kind === 'project')

@@ -16,9 +16,9 @@ import type * as Prisma from "../internal/prismaNamespace.ts"
 
 /**
  * Model StorageCatalogQueue
- * Library changes waiting to be mirrored into storage as catalog/*.json by StorageCatalogService.
+ * Library changes waiting to be appended to the storage catalog by StorageCatalogService.
  * Filled by database triggers on assets, asset_metadata_values, projects and metadata_fields
- * (see migration add_storage_catalog_queue). id is an asset id, 'project:<id>' or 'field:<key>'.
+ * (see migration add_storage_catalog). id is an asset id, 'project:<id>' or 'field:<key>'.
  */
 export type StorageCatalogQueueModel = runtime.Types.Result.DefaultSelection<Prisma.$StorageCatalogQueuePayload>
 

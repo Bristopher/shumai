@@ -2,21 +2,29 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AssetStatus, AssetType, prisma } from '@shumai/db'
 import { setupTestDbHooks } from '@shumai/db/test'
 import { s3Service } from '@shumai/core/src/s3/s3'
-import { catalogRecordKey, CatalogAssetRecord, StorageCatalogService } from './catalog'
+import {
+  CATALOG_LOG_PREFIX,
+  CATALOG_SNAPSHOT_PREFIX,
+  CatalogAssetRecord,
+  catalogSnapshotKey,
+  decodeCatalogObject,
+  readCatalog,
+  StorageCatalogService,
+} from './catalog'
 import { restoreFromCatalog } from './restore'
 
 // In-memory storage so the catalog can be written and read back.
 const store = new Map<string, Buffer>()
 vi.mock('@shumai/core/src/s3/s3', () => ({
   s3Service: {
-    putObject: vi.fn(async (_bucket: string, key: string, body: string) => {
+    putObject: vi.fn(async (_bucket: string, key: string, body: Buffer) => {
       store.set(key, Buffer.from(body))
     }),
     deleteObject: vi.fn(async (_bucket: string, key: string) => (store.delete(key) ? 1 : 0)),
     getObject: vi.fn(async (_bucket: string, key: string) => {
       const buffer = store.get(key)
       if (!buffer) throw new Error('NoSuchKey')
-      return { buffer, contentType: 'application/json' }
+      return { buffer, contentType: 'application/octet-stream' }
     }),
     headObject: vi.fn(async (_bucket: string, key: string) => {
       if (!store.has(key)) throw new Error('NoSuchKey')
@@ -29,15 +37,14 @@ vi.mock('@shumai/core/src/s3/s3', () => ({
 }))
 
 const queued = async () =>
-  (await prisma.storageCatalogQueue.findMany({ select: { id: true } }))
-    .map((r) => r.id)
-    .filter((id) => id !== 'catalog:complete')
-    .sort()
+  (await prisma.storageCatalogQueue.findMany({ select: { id: true } })).map((r) => r.id).sort()
 
-const record = (id: string) => {
-  const buffer = store.get(catalogRecordKey(id))
-  return buffer ? (JSON.parse(buffer.toString()) as CatalogAssetRecord) : undefined
-}
+const keys = (prefix: string) => [...store.keys()].filter((k) => k.startsWith(prefix)).sort()
+
+/** The library as the catalog in storage describes it, by ref. */
+const catalog = async () => new Map((await readCatalog()).records.map((r) => [r.ref, r]))
+const assetRecord = async (id: string) =>
+  (await catalog()).get(id) as CatalogAssetRecord | undefined
 
 describe('storage catalog', () => {
   setupTestDbHooks()
@@ -81,7 +88,7 @@ describe('storage catalog', () => {
   beforeEach(async () => {
     vi.stubEnv('STORAGE_CATALOG_ENABLED', 'true')
     store.clear()
-    service = new StorageCatalogService()
+    service = new StorageCatalogService({ compactAfterSegments: 1000 })
     teamId = (await prisma.team.create({ data: { name: 'catalog-team' } })).id
     projectId = (await prisma.project.create({ data: { name: 'Trip', teamId } })).id
     rootId = (
@@ -161,79 +168,101 @@ describe('storage catalog', () => {
   })
 
   describe('writer', () => {
-    it('writes one record per object, with the parent id and tags', async () => {
+    it('starts with a snapshot of the existing library', async () => {
+      expect(keys(CATALOG_SNAPSHOT_PREFIX)).toHaveLength(1)
+      expect(keys(CATALOG_LOG_PREFIX)).toEqual([])
+      const c = await catalog()
+      expect(c.get(rootId)).toMatchObject({ kind: 'asset', name: 'root', projectId })
+      expect(c.get(`project:${projectId}`)).toMatchObject({ name: 'Trip', rootFolderId: rootId })
+    })
+
+    it('writes each batch of changes as one log segment', async () => {
       const a = await folder('Hari', rootId)
-      const f = await file('DSCF1154.MOV', a)
-      await prisma.assetMetadataValue.create({
-        data: { assetId: f, fieldKey: 'camera', stringValue: 'X-S20' },
+      const files: string[] = []
+      for (let i = 0; i < 20; i++) files.push(await file(`DSCF${1000 + i}.RAF`, a))
+      await prisma.assetMetadataValue.createMany({
+        data: files.map((assetId) => ({ assetId, fieldKey: 'camera', stringValue: 'X-S20' })),
       })
+      vi.mocked(s3Service.putObject).mockClear()
       await drain()
 
-      const r = record(f)!
-      expect(r).toMatchObject({
-        kind: 'asset',
-        name: 'DSCF1154.MOV',
+      expect(s3Service.putObject).toHaveBeenCalledTimes(1)
+      const [segment] = keys(CATALOG_LOG_PREFIX)
+      expect(decodeCatalogObject(store.get(segment)!)).toHaveLength(21)
+      expect(await assetRecord(files[0])).toMatchObject({
+        name: 'DSCF1000.RAF',
         parentId: a,
-        projectId,
-        storageKey: 'files/DSCF1154.MOV-key/DSCF1154.MOV',
+        storageKey: 'files/DSCF1000.RAF-key/DSCF1000.RAF',
         metadata: { camera: { stringValue: 'X-S20' } },
-      })
-      expect(
-        JSON.parse(store.get(catalogRecordKey(`project:${projectId}`))!.toString()),
-      ).toMatchObject({
-        kind: 'project',
-        name: 'Trip',
-        rootFolderId: rootId,
       })
     })
 
-    it('rewrites only the folder record when a folder moves', async () => {
+    it('records one object when a folder with files moves', async () => {
       const a = await folder('A', rootId)
       const b = await folder('B', rootId)
       await file('1.JPG', a)
       await file('2.JPG', a)
       await drain()
-      vi.mocked(s3Service.putObject).mockClear()
+      const before = keys(CATALOG_LOG_PREFIX)
 
       await prisma.asset.update({ where: { id: a }, data: { parentId: b } })
       await drain()
 
-      expect(s3Service.putObject).toHaveBeenCalledTimes(1)
-      expect(record(a)!.parentId).toBe(b)
+      const added = keys(CATALOG_LOG_PREFIX).filter((k) => !before.includes(k))
+      expect(added).toHaveLength(1)
+      expect(decodeCatalogObject(store.get(added[0])!).map((e) => e.ref)).toEqual([a])
+      expect((await assetRecord(a))!.parentId).toBe(b)
     })
 
-    it('removes the record once the asset is gone', async () => {
+    it('records a deletion so the object drops out of the catalog', async () => {
       const f = await file('gone.JPG', rootId)
       await drain()
-      expect(record(f)).toBeDefined()
+      expect(await assetRecord(f)).toBeDefined()
 
       await prisma.asset.delete({ where: { id: f } })
       await drain()
-      expect(record(f)).toBeUndefined()
+      expect(await assetRecord(f)).toBeUndefined()
     })
 
-    it('puts a change back in the queue when storage fails', async () => {
+    it('keeps changes queued when storage fails, and writes them on the next pass', async () => {
       const f = await file('retry.JPG', rootId)
       vi.mocked(s3Service.putObject).mockRejectedValueOnce(new Error('storage down'))
-      await service.syncOnce()
+      await expect(service.syncOnce()).rejects.toThrow('storage down')
       expect(await queued()).toEqual([f])
 
       await drain()
-      expect(record(f)).toBeDefined()
+      expect(await assetRecord(f)).toBeDefined()
     })
 
-    it('when disabled, empties the queue without writing, and backfills when enabled again', async () => {
+    it('compacts the log into a new snapshot and removes what it replaces', async () => {
+      service = new StorageCatalogService({ compactAfterSegments: 3 })
+      const ids: string[] = []
+      for (let i = 0; i < 4; i++) {
+        ids.push(await file(`${i}.JPG`, rootId))
+        await drain()
+      }
+      // three segments were written, then the fourth pass compacted first
+      expect(keys(CATALOG_SNAPSHOT_PREFIX)).toHaveLength(1)
+      expect(keys(CATALOG_SNAPSHOT_PREFIX)[0]).not.toBe(catalogSnapshotKey(1n))
+      expect(keys(CATALOG_LOG_PREFIX).length).toBeLessThanOrEqual(1)
+      const c = await catalog()
+      for (const id of ids) expect(c.get(id)).toBeDefined()
+    })
+
+    it('when switched off, empties the queue without writing, and starts over when switched on', async () => {
       const f = await file('offline.JPG', rootId)
       vi.stubEnv('STORAGE_CATALOG_ENABLED', 'false')
       vi.mocked(s3Service.putObject).mockClear()
       await drain()
       expect(s3Service.putObject).not.toHaveBeenCalled()
       expect(await queued()).toEqual([])
+      const oldSnapshot = keys(CATALOG_SNAPSHOT_PREFIX)[0]
 
       vi.stubEnv('STORAGE_CATALOG_ENABLED', 'true')
       await drain()
-      expect(record(f)).toBeDefined()
-      expect(record(rootId)).toBeDefined()
+      expect(keys(CATALOG_SNAPSHOT_PREFIX)).toHaveLength(1)
+      expect(keys(CATALOG_SNAPSHOT_PREFIX)[0] > oldSnapshot).toBe(true)
+      expect(await assetRecord(f)).toBeDefined()
     })
   })
 
@@ -299,19 +328,14 @@ describe('storage catalog', () => {
     })
 
     it('refuses to guess a team that does not exist', async () => {
+      await prisma.project.create({ data: { id: 'elsewhere', name: 'X', teamId } })
       await drain()
-      store.set(
-        catalogRecordKey('project:elsewhere'),
-        Buffer.from(
-          JSON.stringify({
-            v: 1,
-            kind: 'project',
-            id: 'elsewhere',
-            name: 'X',
-            teamId: 'no-such-team',
-          }),
-        ),
-      )
+      // the catalog now refers to a team this database does not have
+      await prisma.project.delete({ where: { id: 'elsewhere' } })
+      await prisma.project.update({ where: { id: projectId }, data: { rootFolderId: null } })
+      await prisma.asset.deleteMany({ where: { projectId } })
+      await prisma.project.delete({ where: { id: projectId } })
+      await prisma.team.delete({ where: { id: teamId } })
       await expect(restoreFromCatalog({ dryRun: true })).rejects.toThrow(/team/)
     })
   })
