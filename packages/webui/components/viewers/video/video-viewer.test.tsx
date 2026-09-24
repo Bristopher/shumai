@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { cleanup, render } from '@testing-library/react'
+import { act, cleanup, render } from '@testing-library/react'
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import VideoViewer from './video-viewer'
@@ -303,5 +303,70 @@ describe('VideoViewer', () => {
     )
 
     window.matchMedia = originalMatchMedia
+  })
+
+  it('shows play button and darkened overlay initially, but never again after playing (even when paused or scrubbed back to start)', () => {
+    const listeners: Record<string, () => void> = {}
+    videojsMock.mockImplementation(() => ({
+      on: vi.fn((event: string, cb: () => void) => {
+        listeners[event] = cb
+      }),
+      volume: vi.fn(),
+      duration: vi.fn(() => 10),
+      currentTime: vi.fn(() => 0),
+      bufferedEnd: vi.fn(() => 0),
+      playbackRate: vi.fn(() => 1),
+      ready: vi.fn(),
+      dispose: vi.fn(),
+      isDisposed: vi.fn(() => false),
+    }))
+
+    const testVideo: AssetInfo = {
+      id: 'test-video-lifecycle',
+      name: 'test.mp4',
+      proxyType: 'video',
+      media: {
+        metadata: {
+          originalWidth: 1920,
+          originalHeight: 1080,
+          duration: 10,
+          frameRate: 30,
+          totalFrames: 300,
+        },
+        videoTranscodes: [
+          {
+            resolution: '1080p',
+            url: 'https://cdn.example.com/test-1080p.mp4',
+            width: 1920,
+            height: 1080,
+          },
+        ],
+      },
+    } as unknown as AssetInfo
+
+    const { container } = render(<VideoViewer file={testVideo} />)
+    const videoArea = container.querySelector('[data-testid="video-area"]')
+    expect(videoArea).toBeTruthy()
+
+    // 1. Initially (before playing): play button & 20% black tint are present
+    expect(videoArea?.querySelector('.bg-black\\/20')).not.toBeNull()
+
+    // 2. Start playback
+    act(() => {
+      listeners['play']?.()
+    })
+    expect(videoArea?.querySelector('.bg-black\\/20')).toBeNull()
+
+    // 3. Pause video: overlay must NOT show again
+    act(() => {
+      listeners['pause']?.()
+    })
+    expect(videoArea?.querySelector('.bg-black\\/20')).toBeNull()
+
+    // 4. Drag seekbar / time back to 0: overlay must STILL NOT show
+    act(() => {
+      listeners['timeupdate']?.()
+    })
+    expect(videoArea?.querySelector('.bg-black\\/20')).toBeNull()
   })
 })

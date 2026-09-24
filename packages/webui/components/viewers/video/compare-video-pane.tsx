@@ -103,6 +103,7 @@ export const CompareVideoPane = forwardRef<ComparePaneHandle, CompareVideoPanePr
     const [pan, setPan] = useState<{ x: number; y: number } | null>(null)
 
     const [isPlaying, setIsPlaying] = useState(false)
+    const [hasStartedPlaying, setHasStartedPlaying] = useState(false)
     const [isLooping, setIsLooping] = useState(false)
     const [playbackRate, setPlaybackRate] = useState(1)
     const [buffered, setBuffered] = useState(0)
@@ -163,6 +164,7 @@ export const CompareVideoPane = forwardRef<ComparePaneHandle, CompareVideoPanePr
       setCurrentResolution(res?.resolution ?? '')
       setIsCurrentHdr(res?.hdr)
       currentSrcRef.current = res?.url
+      setHasStartedPlaying(false)
     }, [file.id])
 
     // Initialize video.js
@@ -195,6 +197,7 @@ export const CompareVideoPane = forwardRef<ComparePaneHandle, CompareVideoPanePr
 
       player.on('play', () => {
         setIsPlaying(true)
+        setHasStartedPlaying(true)
         onPlay?.()
       })
       player.on('pause', () => setIsPlaying(false))
@@ -365,12 +368,19 @@ export const CompareVideoPane = forwardRef<ComparePaneHandle, CompareVideoPanePr
             player.pause()
           }
         },
-        seekToFrame: (frame) => seekToFrame(clampFrame(frame)),
+        seekToFrame: (frame) => {
+          setHasStartedPlaying(true)
+          return seekToFrame(clampFrame(frame))
+        },
         seekToSecond: (second) => {
+          setHasStartedPlaying(true)
           const frame = Math.floor(second * frameRate + 0.45)
           seekToFrame(clampFrame(frame))
         },
-        stepFrame: (delta) => seekToFrame(clampFrame(currentFrameRef.current + delta)),
+        stepFrame: (delta) => {
+          setHasStartedPlaying(true)
+          return seekToFrame(clampFrame(currentFrameRef.current + delta))
+        },
         setMuted: (m) => playerRef.current?.muted(m),
         setVolume: (v) => {
           const player = playerRef.current
@@ -502,8 +512,8 @@ export const CompareVideoPane = forwardRef<ComparePaneHandle, CompareVideoPanePr
           )
         )}
 
-        {!isPlaying && !isDrawing && (
-          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black/20">
+        {!hasStartedPlaying && !isDrawing && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black/20 transition-opacity duration-200">
             <div className="flex h-16 w-16 items-center justify-center rounded-full border-2 border-white/30 bg-white/10 backdrop-blur-sm">
               <Play className="ml-1 h-8 w-8 fill-white text-white" />
             </div>
