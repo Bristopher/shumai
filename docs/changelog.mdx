@@ -1,7 +1,26 @@
 ---
-title: 'Changelog'
-description: 'Recent updates, new features, and improvements in Shumai'
+title: "Changelog"
+description: "Recent updates, new features, and improvements in Shumai"
 ---
+
+<Update label="v0.4.8" description="September 24, 2026">
+
+### Added
+
+- **transcode**: Add HDR video proxy support: HDR videos automatically generate HDR video proxies and preview videos preserving HDR color characteristics, tone-mapped SDR thumbnails and posters, and automatic HDR player playback on supported displays with hardware EDR acceleration
+- **docs**: Add a Changelog section to the documentation site so users can explore release notes and updates directly in Mintlify
+
+### Fixed
+
+- **webui**: Only show the center play button and darkened tint on initial video open before playback starts; once played, pausing or scrubbing back to start keeps the video canvas clean and unobstructed for review
+- **transcode**: Fix an issue where videos with orientation or rotation metadata (such as smartphone vertical videos) were incorrectly displayed with stretched aspect ratios in the video player
+- **cli**: Only manage and check PID files in daemon mode, preventing stale PID files, crash-loop conflicts, or spurious process checks during normal foreground and Docker execution
+
+### Changed
+
+- **transcode**: Improve video proxy visual quality and disable B-frames for smoother frame-by-frame seeking and scrubbing
+
+</Update>
 
 <Update label="v0.4.7" description="September 19, 2026">
 

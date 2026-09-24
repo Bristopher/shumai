@@ -15,15 +15,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **file-browser**: Sort files by "Date Taken", with a heading for each day
 - **file-browser**: Add a "Camera" filter next to Type that narrows the folder to chosen cameras, lenses or film simulations, with how many shots use each
 - **file-browser**: Add a "Stack" button that shows all the files of one shot (for example DSCF5543.JPG, DSCF5543.RAF and its XMP sidecars) as a single card with a file count; deleting, moving or downloading a stacked card covers every file in it, and the file view lists the shot's files so you can switch between them
-- **docs**: Add a Changelog section to the documentation site so users can explore release notes and updates directly in Mintlify
+- **storage**: Add an optional storage catalog (`STORAGE_CATALOG_ENABLED`): Shumai keeps a small record of every project, folder, file and its metadata next to your files, updated within seconds of any change, and the new `shumai restore-catalog` command rebuilds your library from it if the database is ever lost
 
 ### Fixed
 
 - **transcode**: Fix an issue where portrait photos from cameras and phones appeared sideways in thumbnails, previews, watermarked share links and annotated snapshots, and were listed with their width and height swapped
 - **docker**: Fix an issue where the bundled PostgreSQL container published port 5432 on the host, causing deployment to fail on machines where that port was already in use; the database is now only reachable by Shumai itself
+
+### Changed
+
+## [0.4.8] - 2026-09-24
+
+### Added
+
+- **transcode**: Add HDR video proxy support: HDR videos automatically generate HDR video proxies and preview videos preserving HDR color characteristics, tone-mapped SDR thumbnails and posters, and automatic HDR player playback on supported displays with hardware EDR acceleration
+- **docs**: Add a Changelog section to the documentation site so users can explore release notes and updates directly in Mintlify
+
+### Fixed
+
+- **webui**: Only show the center play button and darkened tint on initial video open before playback starts; once played, pausing or scrubbing back to start keeps the video canvas clean and unobstructed for review
+- **transcode**: Fix an issue where videos with orientation or rotation metadata (such as smartphone vertical videos) were incorrectly displayed with stretched aspect ratios in the video player
 - **cli**: Only manage and check PID files in daemon mode, preventing stale PID files, crash-loop conflicts, or spurious process checks during normal foreground and Docker execution
 
 ### Changed
+
+- **transcode**: Improve video proxy visual quality and disable B-frames for smoother frame-by-frame seeking and scrubbing
+
 
 ## [0.4.7] - 2026-09-19
 

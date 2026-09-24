@@ -149,9 +149,11 @@ All notable changes documented here.
       const releases = parseChangelogReleases(content)
 
       expect(releases.length).toBeGreaterThan(40)
-      expect(releases[0].version).toBe('0.4.7')
-      expect(releases[0].date).toBe('2026-09-19')
-      expect(releases[0].content).toContain('Introduce Keep a Changelog support')
+
+      const release047 = releases.find((r) => r.version === '0.4.7')
+      expect(release047).toBeDefined()
+      expect(release047?.date).toBe('2026-09-19')
+      expect(release047?.content).toContain('Introduce Keep a Changelog support')
 
       const mdx = generateMdxChangelog(releases)
       expect(mdx).toContain('<Update label="v0.4.7" description="September 19, 2026">')

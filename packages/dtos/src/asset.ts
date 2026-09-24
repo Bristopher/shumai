@@ -19,6 +19,7 @@ export const previewInfoSchema = z.object({
   thumbnailUrl: z.string().optional(),
   originalHeight: z.number().optional(),
   originalWidth: z.number().optional(),
+  rotation: z.number().optional(),
   spriteUrl: z.string().optional(),
   duration: z.number().optional(),
   pageCount: z.number().optional(),
@@ -61,6 +62,7 @@ export const mediaMetadataSchema = z.object({
   duration: z.number().optional(),
   originalWidth: z.number().optional(),
   originalHeight: z.number().optional(),
+  rotation: z.number().optional(),
   frameRate: z.number().optional(),
   totalFrames: z.number().optional(),
   startTimecode: z.string().optional(),
@@ -106,6 +108,7 @@ export const assetInfoSchema = z.object({
             width: z.number(),
             height: z.number(),
             size: z.number(),
+            hdr: z.boolean().optional(),
           }),
         )
         .optional(),
@@ -338,6 +341,7 @@ export interface VideoTranscode {
   width: number
   height: number
   size: number
+  hdr?: boolean
 }
 
 export const postAttachmentRequestSchema = z.object({

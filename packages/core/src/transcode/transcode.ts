@@ -89,6 +89,8 @@ export function parseCsvContent(content: string): string[][] {
   }
 }
 
+export type HdrType = 'pq' | 'hlg' | 'dovi_p5' | 'dovi_p8' | 'sdr'
+
 export interface MediaMetadata {
   originalWidth: number
   originalHeight: number
@@ -107,6 +109,14 @@ export interface MediaMetadata {
   audioSampleRate?: number
   audioBitDepth?: number
   mimeType: string
+  colorTransfer?: string
+  colorPrimaries?: string
+  colorSpace?: string
+  isHdr?: boolean
+  hdrType?: HdrType
+  dvProfile?: number
+  dvCompatibilityId?: number
+  rotation?: number
 }
 
 export interface TranscodeVideoParams {
@@ -122,6 +132,12 @@ export interface TranscodeVideoParams {
   sourceVideoBitrate?: number
   threads?: number
   signal?: AbortSignal
+  hdr?: boolean
+  sourceIsHdr?: boolean
+  sourceHdrType?: HdrType
+  sourceColorTransfer?: string
+  sourceColorPrimaries?: string
+  sourceColorSpace?: string
 }
 
 export interface EncoderConfig {
@@ -144,11 +160,11 @@ export const H264_ENCODER_CONFIGS: Record<string, EncoderConfig> = {
   },
   h264_videotoolbox: {
     name: 'h264_videotoolbox',
-    presetArgs: ['-q:v', '74'],
+    presetArgs: [],
   },
   libx264: {
     name: 'libx264',
-    presetArgs: ['-preset', 'fast', '-crf', '26'],
+    presetArgs: ['-preset', 'fast', '-crf', '23', '-bf', '0'],
   },
 }
 
@@ -184,12 +200,12 @@ export function getDefaultBitrate(height: number, width?: number): string {
   return `${Math.round(bps / 1000)}k`
 }
 
-export function calculateMaxBitrate(
+export function calculateEffectiveBitrateBps(
   targetHeight: number,
   targetWidth?: number,
   sourceVideoBitrate?: number,
   targetFps?: number | string,
-): { maxrate: string; bufsize: string } {
+): number {
   let configuredMaxBps = getDefaultBitrateBps(targetHeight, targetWidth)
 
   // If frame rate is downsampled (e.g. 180p preview with < 24 fps), scale the bitrate ceiling proportionally
@@ -211,13 +227,27 @@ export function calculateMaxBitrate(
     }
   }
 
-  let effectiveMaxBps =
+  const effectiveMaxBps =
     sourceVideoBitrate && sourceVideoBitrate > 0
       ? Math.min(configuredMaxBps, Math.round(sourceVideoBitrate * 1.2))
       : configuredMaxBps
 
   const minFloor = targetFps ? 50_000 : 100_000
-  effectiveMaxBps = Math.max(minFloor, effectiveMaxBps)
+  return Math.max(minFloor, effectiveMaxBps)
+}
+
+export function calculateMaxBitrate(
+  targetHeight: number,
+  targetWidth?: number,
+  sourceVideoBitrate?: number,
+  targetFps?: number | string,
+): { maxrate: string; bufsize: string } {
+  const effectiveMaxBps = calculateEffectiveBitrateBps(
+    targetHeight,
+    targetWidth,
+    sourceVideoBitrate,
+    targetFps,
+  )
 
   const maxrateKbps = Math.max(50, Math.round(effectiveMaxBps / 1000))
   const bufsizeKbps = maxrateKbps * 2
@@ -226,6 +256,24 @@ export function calculateMaxBitrate(
     maxrate: `${maxrateKbps}k`,
     bufsize: `${bufsizeKbps}k`,
   }
+}
+
+export function buildSdrToneMapFilterChain(options: {
+  hdrType?: HdrType
+  availableFilters?: Set<string>
+  colorTransfer?: string
+}): string {
+  if (options.availableFilters) {
+    if (!options.availableFilters.has('zscale') || !options.availableFilters.has('tonemap')) {
+      throw new Error('zscale and tonemap filters are required for HDR tone mapping')
+    }
+  }
+
+  const tin =
+    options.hdrType === 'hlg' || options.colorTransfer === 'arib-std-b67'
+      ? 'arib-std-b67'
+      : 'smpte2084'
+  return `setparams=color_primaries=bt2020:color_trc=${tin}:colorspace=bt2020nc,zscale=tin=${tin}:pin=bt2020:min=bt2020nc:t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0:peak=100,zscale=t=bt709:m=bt709:out_range=full,format=yuv420p`
 }
 
 export interface ExtractVideoFramesParams {
@@ -631,9 +679,101 @@ export class TranscodeService {
       }
     }
 
+    const colorTransfer =
+      typeof videoStream.color_transfer === 'string'
+        ? videoStream.color_transfer.toLowerCase()
+        : undefined
+    const colorPrimaries =
+      typeof videoStream.color_primaries === 'string'
+        ? videoStream.color_primaries.toLowerCase()
+        : undefined
+    const colorSpace =
+      typeof videoStream.color_space === 'string'
+        ? videoStream.color_space.toLowerCase()
+        : undefined
+
+    let dvProfile: number | undefined
+    let dvCompatibilityId: number | undefined
+
+    if (Array.isArray(videoStream.side_data_list)) {
+      const dovi = videoStream.side_data_list.find(
+        (sd: unknown): sd is Record<string, unknown> =>
+          typeof (sd as Record<string, unknown>)?.side_data_type === 'string' &&
+          String((sd as Record<string, unknown>).side_data_type)
+            .toLowerCase()
+            .includes('dovi'),
+      )
+      if (dovi) {
+        dvProfile = this.safeParseInt(dovi.dv_profile)
+        dvCompatibilityId = this.safeParseInt(dovi.dv_bl_signal_compatibility_id)
+      }
+    }
+
+    let isHdr: boolean
+    let hdrType: HdrType
+
+    if (dvProfile === 5) {
+      isHdr = true
+      hdrType = 'dovi_p5'
+    } else if (dvProfile !== undefined) {
+      if (colorTransfer === 'smpte2084') {
+        isHdr = true
+        hdrType = 'pq'
+      } else if (colorTransfer === 'arib-std-b67') {
+        isHdr = true
+        hdrType = 'hlg'
+      } else {
+        isHdr = false
+        hdrType = 'sdr'
+      }
+    } else {
+      if (colorTransfer === 'smpte2084') {
+        isHdr = true
+        hdrType = 'pq'
+      } else if (colorTransfer === 'arib-std-b67') {
+        isHdr = true
+        hdrType = 'hlg'
+      } else {
+        isHdr = false
+        hdrType = 'sdr'
+      }
+    }
+
+    let rotation = 0
+
+    if (Array.isArray(videoStream.side_data_list)) {
+      const displayMatrix = videoStream.side_data_list.find(
+        (sd: unknown): sd is Record<string, unknown> =>
+          typeof (sd as Record<string, unknown>)?.side_data_type === 'string' &&
+          String((sd as Record<string, unknown>).side_data_type).toLowerCase() === 'display matrix',
+      )
+      if (displayMatrix && typeof displayMatrix.rotation === 'number') {
+        rotation = displayMatrix.rotation
+      }
+    }
+
+    if (!rotation) {
+      const rotateTag = videoStream.tags?.rotate || info.format?.tags?.rotate
+      if (rotateTag) {
+        const parsed = parseFloat(rotateTag)
+        if (Number.isFinite(parsed)) {
+          rotation = parsed
+        }
+      }
+    }
+
+    const normalizedRotation = ((Math.round(rotation) % 360) + 360) % 360
+    const isRotatedVertical = normalizedRotation === 90 || normalizedRotation === 270
+
+    const rawWidth = typeof videoStream.width === 'number' ? videoStream.width : 0
+    const rawHeight = typeof videoStream.height === 'number' ? videoStream.height : 0
+    const originalWidth = isRotatedVertical ? rawHeight : rawWidth
+    const originalHeight = isRotatedVertical ? rawWidth : rawHeight
+
     return {
-      originalWidth: videoStream.width,
-      originalHeight: videoStream.height,
+      originalWidth,
+      originalHeight,
+      rotation: rotation || undefined,
       duration,
       bitRate: parseFloat(info.format.bit_rate),
       videoBitRate,
@@ -650,6 +790,13 @@ export class TranscodeService {
         this.safeParseInt(audioStream?.bits_per_raw_sample) ??
         this.safeParseInt(audioStream?.bits_per_sample),
       mimeType: '',
+      colorTransfer,
+      colorPrimaries,
+      colorSpace,
+      isHdr,
+      hdrType,
+      dvProfile,
+      dvCompatibilityId,
     }
   }
 
@@ -745,6 +892,34 @@ export class TranscodeService {
     }
   }
 
+  private availableFiltersCache: Set<string> | null = null
+
+  clearFiltersCache(): void {
+    this.availableFiltersCache = null
+  }
+
+  async getAvailableFilters(): Promise<Set<string>> {
+    if (this.availableFiltersCache) {
+      return this.availableFiltersCache
+    }
+    try {
+      const { stdout } = await execFileAsync('ffmpeg', ['-filters'])
+      const filters = new Set<string>()
+      const lines = stdout.split('\n')
+      for (const line of lines) {
+        const match = line.match(/^\s*[A-Z.]{2,4}\s+([a-zA-Z0-9_-]+)/)
+        if (match) {
+          filters.add(match[1])
+        }
+      }
+      this.availableFiltersCache = filters
+      return filters
+    } catch (err) {
+      console.warn('Failed to probe ffmpeg filters:', err)
+      return new Set<string>()
+    }
+  }
+
   async selectH264Encoder(
     hardwareAcceleration?: 'off' | 'auto',
     platform: NodeJS.Platform = process.platform,
@@ -765,14 +940,22 @@ export class TranscodeService {
   }
 
   async transcodeVideo(params: TranscodeVideoParams): Promise<void> {
+    const isSourceHdr =
+      params.sourceIsHdr ||
+      params.sourceHdrType === 'pq' ||
+      params.sourceHdrType === 'hlg' ||
+      params.sourceHdrType === 'dovi_p5'
+    const isHdrOutput = Boolean(params.hdr)
+
     let filterComplex: string
     const args: string[] = ['-i', params.inputFile]
+    const baseScale = `scale=w=${params.width}:h=${params.height}:force_original_aspect_ratio=decrease,scale=w='trunc(iw/2)*2':h='trunc(ih/2)*2'`
 
     if (params.overlayFile) {
       args.push('-i', params.overlayFile)
       filterComplex = `[0:v]scale=${params.width}:${params.height}[vscaled];[vscaled][1:v]overlay=0:0`
     } else {
-      filterComplex = `[0:v]scale=w=${params.width}:h=${params.height}:force_original_aspect_ratio=decrease,scale=w='trunc(iw/2)*2':h='trunc(ih/2)*2'`
+      filterComplex = `[0:v]${baseScale}`
     }
 
     if (params.frameRate) {
@@ -817,19 +1000,43 @@ export class TranscodeService {
       args.push(...encoder.presetArgs)
     }
 
-    if (params.videoBitrate) {
-      args.push('-b:v', params.videoBitrate)
+    if (encoder.name === 'h264_videotoolbox') {
+      if (params.videoBitrate) {
+        args.push('-b:v', params.videoBitrate)
+      } else {
+        const targetBps = calculateEffectiveBitrateBps(
+          params.height,
+          params.width,
+          params.sourceVideoBitrate,
+          params.frameRate,
+        )
+        const targetKbps = Math.max(50, Math.round(targetBps / 1000))
+        args.push('-b:v', `${targetKbps}k`)
+      }
     } else {
-      const { maxrate, bufsize } = calculateMaxBitrate(
-        params.height,
-        params.width,
-        params.sourceVideoBitrate,
-        params.frameRate,
-      )
-      args.push('-maxrate', maxrate, '-bufsize', bufsize)
+      if (params.videoBitrate) {
+        args.push('-b:v', params.videoBitrate)
+      } else {
+        const { maxrate, bufsize } = calculateMaxBitrate(
+          params.height,
+          params.width,
+          params.sourceVideoBitrate,
+          params.frameRate,
+        )
+        args.push('-maxrate', maxrate, '-bufsize', bufsize)
+      }
     }
 
     args.push('-pix_fmt', 'yuv420p')
+
+    if (isSourceHdr && isHdrOutput) {
+      const isHlg = params.sourceHdrType === 'hlg' || params.sourceColorTransfer === 'arib-std-b67'
+      const trc = isHlg ? 'arib-std-b67' : 'smpte2084'
+      args.push('-color_primaries', 'bt2020', '-color_trc', trc, '-colorspace', 'bt2020nc')
+      if (encoder.name === 'libx264') {
+        args.push('-x264-params', `colorprim=bt2020:transfer=${trc}:colormatrix=bt2020nc`)
+      }
+    }
 
     if (!params.disableAudio) {
       args.push('-c:a', 'aac', '-b:a', '128k')
@@ -972,9 +1179,22 @@ export class TranscodeService {
     outputPoster: string,
     duration: number,
     signal?: AbortSignal,
+    hdrOptions?: { isHdr?: boolean; hdrType?: HdrType; colorTransfer?: string },
   ): Promise<void> {
     const spriteFps = 100 / duration
-    const filterComplex = `[0:v]fps=${spriteFps},scale=w=300:h=-2,tile=10x10[sprite_out];[0:v]scale=-2:300:force_original_aspect_ratio=decrease,select='eq(n\\,0)'[thumb_out]`
+    let filterComplex: string
+
+    if (hdrOptions?.isHdr) {
+      const availableFilters = await this.getAvailableFilters()
+      const tonemap = buildSdrToneMapFilterChain({
+        hdrType: hdrOptions.hdrType,
+        colorTransfer: hdrOptions.colorTransfer,
+        availableFilters,
+      })
+      filterComplex = `[0:v]${tonemap},split=2[v_sprite][v_thumb];[v_sprite]fps=${spriteFps},scale=w=300:h=-2,tile=10x10[sprite_out];[v_thumb]scale=-2:300:force_original_aspect_ratio=decrease,select='eq(n\\,0)'[thumb_out]`
+    } else {
+      filterComplex = `[0:v]split=2[v_sprite][v_thumb];[v_sprite]fps=${spriteFps},scale=w=300:h=-2,tile=10x10[sprite_out];[v_thumb]scale=-2:300:force_original_aspect_ratio=decrease,select='eq(n\\,0)'[thumb_out]`
+    }
 
     const args = [
       '-i',

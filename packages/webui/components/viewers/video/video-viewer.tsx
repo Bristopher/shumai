@@ -54,17 +54,30 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
     // We use a container ref to manually append the video element
     const videoContainerRef = useRef<HTMLDivElement>(null)
 
-    // Logic to select best resolution based on screen size
+    // Logic to select best resolution based on screen size and dynamic range
     const getInitialResolution = (): DisplayTranscode | null => {
       if (resolutions.length === 0) return null
 
       if (typeof window === 'undefined') return resolutions[0]
 
+      const prefersHdr =
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(dynamic-range: high)').matches
+      const hasHdr = resolutions.some((r) => r.hdr)
+      const hasSdr = resolutions.some((r) => !r.hdr)
+
+      let candidateResolutions = resolutions
+      if (prefersHdr && hasHdr) {
+        candidateResolutions = resolutions.filter((r) => r.hdr)
+      } else if (!prefersHdr && hasSdr) {
+        candidateResolutions = resolutions.filter((r) => !r.hdr)
+      }
+
       // Use device pixel ratio for high DPI screens
       const screenWidth = window.innerWidth * (window.devicePixelRatio || 1)
 
       // 1. Sort by width ascending
-      const sortedResolutions = [...resolutions].sort((a, b) => {
+      const sortedResolutions = [...candidateResolutions].sort((a, b) => {
         const wA = a.width ?? 0
         const wB = b.width ?? 0
         return wA - wB
@@ -93,7 +106,9 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
       showFrames: false,
       currentResolution: initialRes?.resolution ?? '',
       currentSrc: initialRes?.url ?? '',
+      isCurrentHdr: initialRes?.hdr ?? false,
     })
+    const [hasStartedPlaying, setHasStartedPlaying] = useState(false)
     const containerRef = useRef<HTMLDivElement>(null)
     const rootRef = useRef<HTMLDivElement>(null)
     const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -110,6 +125,7 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
         }
       },
       seekTo: (second: number) => {
+        setHasStartedPlaying(true)
         if (localPlayerRef.current) {
           localPlayerRef.current.currentTime(second)
         }
@@ -140,11 +156,13 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
         duration: data.media?.metadata?.duration || 0,
         currentResolution: res?.resolution ?? '',
         currentSrc: res?.url ?? '',
+        isCurrentHdr: res?.hdr ?? false,
       }))
       setHasManuallyZoomed(false)
       setIsPlayerReady(false)
       setBuffered(0)
       lastProcessedStartTimeRef.current = null
+      setHasStartedPlaying(false)
     }, [data.id, Boolean(initialRes?.url)])
 
     const vidW = data.media?.metadata?.originalWidth || 1920
@@ -246,6 +264,14 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
     const totalFrames = resolveTotalFrames({ dbTotalFrames, containerDuration, frameRate })
     const { currentFrame, seekToFrame } = useFramePlayer(videoRef, frameRate, totalFrames, isAudio)
 
+    const handleSeekToFrame = useCallback(
+      (frame: number) => {
+        setHasStartedPlaying(true)
+        return seekToFrame(frame)
+      },
+      [seekToFrame],
+    )
+
     const currentTime = currentFrame / frameRate
     const duration = totalFrames / frameRate
     const progress = duration > 0 ? (currentTime / duration) * 100 : 0
@@ -284,8 +310,7 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
       const videoElement = document.createElement('video-js')
       videoElement.classList.add('vjs-big-play-centered', '!h-full', '!w-full')
 
-      // Hide it, but keep it in DOM
-      videoElement.style.opacity = '0'
+      // Keep it in DOM, enable visible rendering
       videoElement.style.pointerEvents = 'none'
 
       // Append to our container
@@ -348,6 +373,7 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
 
       player.on('play', () => {
         setState((p) => ({ ...p, isPlaying: true }))
+        setHasStartedPlaying(true)
         onPlay?.()
       })
       player.on('pause', () => {
@@ -413,6 +439,7 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
         if (startTime !== lastProcessedStartTimeRef.current) {
           lastProcessedStartTimeRef.current = startTime
           const targetFrame = Math.floor(startTime * frameRate + 0.45)
+          setHasStartedPlaying(true)
           seekToFrame(targetFrame)
         }
       }
@@ -600,6 +627,7 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
         ...prev,
         currentResolution: res.resolution,
         currentSrc: res.url,
+        isCurrentHdr: res.hdr ?? false,
       }))
 
       player.src({ type: 'video/mp4', src: res.url })
@@ -758,8 +786,31 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
             data-vjs-player
             data-testid="video-area"
           >
-            {/* Hidden VideoJS container */}
-            <div ref={videoContainerRef} className="absolute inset-0 z-[-1]" />
+            {/* Native Video Layer (Hardware-accelerated, full HDR EDR) */}
+            {!isAudio && (
+              <div
+                className="absolute pointer-events-none"
+                style={{
+                  left: 0,
+                  top: 0,
+                  width: vidW,
+                  height: vidH,
+                  transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`,
+                  transformOrigin: '0 0',
+                }}
+              >
+                <div
+                  ref={videoContainerRef}
+                  className="w-full h-full [&_.video-js]:!w-full [&_.video-js]:!h-full [&_video]:!w-full [&_video]:!h-full [&_video]:!block [&_video]:!object-contain"
+                />
+              </div>
+            )}
+            {isAudio && (
+              <div
+                ref={videoContainerRef}
+                className="absolute inset-0 pointer-events-none opacity-0"
+              />
+            )}
 
             {isAudio ? (
               <div className="flex flex-col items-center justify-center text-muted-foreground w-full h-full pointer-events-none select-none">
@@ -771,8 +822,7 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
                 />
               </div>
             ) : (
-              /* Drawing Canvas (Visible) */
-              videoHtmlEl &&
+              /* Drawing Canvas (Transparent Overlay for annotations) */
               containerSize.width > 0 && (
                 <DrawingCanvas
                   width={containerSize.width}
@@ -781,7 +831,6 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
                     width: vidW,
                     height: vidH,
                   }}
-                  videoElement={videoHtmlEl}
                   annotations={displayAnnotations}
                   scale={scale}
                   offset={pan}
@@ -798,10 +847,10 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
               )
             )}
 
-            {/* Big Play Button Overlay (when paused) */}
-            {!state.isPlaying && !isDrawing && (
-              <div className="absolute inset-0 flex items-center justify-center bg-black/20 pointer-events-none z-10">
-                <div className="w-20 h-20 bg-white/10 backdrop-blur-sm rounded-full flex items-center justify-center border-2 border-white/30 animate-pulse">
+            {/* Initial Big Play Button Overlay (shown only before playback starts) */}
+            {!hasStartedPlaying && !isDrawing && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/20 pointer-events-none z-10 transition-opacity duration-200">
+                <div className="w-20 h-20 bg-white/10 backdrop-blur-sm rounded-full flex items-center justify-center border-2 border-white/30">
                   <Play className="w-10 h-10 text-white ml-1 fill-white" />
                 </div>
               </div>
@@ -830,7 +879,7 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
             frameRate={frameRate}
             totalFrames={totalFrames}
             currentFrame={currentFrame}
-            seekToFrame={seekToFrame}
+            seekToFrame={handleSeekToFrame}
             onMouseEnter={handleControlsMouseEnter}
             onMouseLeave={handleControlsMouseLeave}
             allowDownload={allowDownload}
@@ -856,7 +905,7 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
             frameRate={frameRate}
             totalFrames={totalFrames}
             currentFrame={currentFrame}
-            seekToFrame={seekToFrame}
+            seekToFrame={handleSeekToFrame}
             onMouseEnter={handleControlsMouseEnter}
             onMouseLeave={handleControlsMouseLeave}
             allowDownload={allowDownload}

@@ -9,6 +9,7 @@ import { initAgentWorkflows } from '@shumai/agent'
 import { app } from '@shumai/api'
 import { assetService } from '@shumai/core/src/asset/asset'
 import { maxRequestBodySize, uploadService } from '@shumai/core/src/upload/upload'
+import { storageCatalogService } from '@shumai/core/src/catalog/catalog'
 import { metadataService } from '@shumai/core/src/metadata/metadata'
 import { initTranscodeWorkflows } from '@shumai/transcode'
 import { workflowService } from '@shumai/workflow-core'
@@ -47,6 +48,33 @@ if (resetCmdIndex !== -1) {
   }
 }
 
+if (cliArgs[0] === 'restore-catalog') {
+  const option = (name: string) => {
+    const i = cliArgs.indexOf(name)
+    return i !== -1 && cliArgs[i + 1] && !cliArgs[i + 1].startsWith('-')
+      ? cliArgs[i + 1]
+      : undefined
+  }
+  try {
+    const { restoreFromCatalog } = await import('@shumai/core/src/catalog/restore')
+    const report = await restoreFromCatalog({
+      teamId: option('--team'),
+      creatorId: option('--creator'),
+      dryRun: cliArgs.includes('--dry-run'),
+      log: (line) => console.log(line),
+    })
+    console.log(JSON.stringify(report, null, 2))
+    process.exit(0)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Unknown error'
+    console.error(`Error: ${message}`)
+    console.error(
+      'Usage: shumai restore-catalog [--team <teamId>] [--creator <userId>] [--dry-run]',
+    )
+    process.exit(1)
+  }
+}
+
 async function run() {
   // Initialize workflows and activities for local executor mode
   initAgentWorkflows()
@@ -60,6 +88,7 @@ async function run() {
   await migrateLegacyAgentAvatars().catch(console.error)
   assetService.startCleanupJob()
   uploadService.startStaleUploadSweep()
+  storageCatalogService.startCatalogSync()
   workflowService.start()
   if (process.env.WORKFLOW_EXECUTOR === 'temporal') {
     const args = process.argv.slice(2)
@@ -182,6 +211,7 @@ async function run() {
     console.log('\nShutting down gracefully...')
     assetService.stopCleanupJob()
     uploadService.stopStaleUploadSweep()
+    storageCatalogService.stopCatalogSync()
     server.stop(true)
     process.exit(0)
   }

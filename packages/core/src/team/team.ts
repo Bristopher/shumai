@@ -33,7 +33,11 @@ export class TeamService {
         data: {
           name: 'Default Team',
           settings: {
-            transcode: { videoStrategy: 'best_match', hardwareAcceleration: 'off', threads: 0 },
+            transcode: {
+              videoStrategy: 'best_match',
+              hardwareAcceleration: 'off',
+              threads: 0,
+            },
           },
           sandbox: { create: {} },
         },
@@ -300,6 +304,14 @@ export class TeamService {
       where: { teamId, type: 'embedding', enabled: true },
     })
     settings.semanticSearchEnabled = !!embeddingAgent
+
+    if (!settings.transcode) {
+      settings.transcode = {
+        videoStrategy: 'best_match',
+        hardwareAcceleration: 'off',
+        threads: 0,
+      }
+    }
 
     if (!settings.appearance) {
       settings.appearance = { hideAgent: false }
