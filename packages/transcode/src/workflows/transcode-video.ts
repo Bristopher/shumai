@@ -69,6 +69,9 @@ export async function transcodeVideoWorkflow(task: WorkflowTask): Promise<void> 
         assetKey: key,
         posterSpec,
         taskId: task.id,
+        isHdr: mediaInfo.metadata?.isHdr,
+        hdrType: mediaInfo.metadata?.hdrType,
+        colorTransfer: mediaInfo.metadata?.colorTransfer,
       })
       mediaInfo.poster = posterResult.poster
       await executeActivity(workerQueue, updateAssetMediaActivity, {
@@ -129,10 +132,42 @@ export async function transcodeVideoWorkflow(task: WorkflowTask): Promise<void> 
           metadata.originalHeight,
         )
 
+        const isHdr = Boolean(metadata.isHdr)
+
+        if (res === '180p') {
+          const videoSpec: PrismaJson.VideoTranscode = {
+            resolution: res,
+            width,
+            height,
+            hdr: isHdr,
+          }
+
+          const videoTranscode = await executeActivity(workerQueue, transcodeVideoActivity, {
+            taskId: task.id,
+            assetKey: key,
+            filePath,
+            videoSpec,
+            duration: metadata.duration,
+            originalFps: metadata.frameRate,
+            hardwareAcceleration: spec.hardwareAcceleration,
+            sourceVideoBitrate: metadata.videoBitRate || metadata.bitRate,
+            threads: spec.threads,
+            sourceIsHdr: metadata.isHdr,
+            sourceHdrType: metadata.hdrType,
+            sourceColorTransfer: metadata.colorTransfer,
+            sourceColorPrimaries: metadata.colorPrimaries,
+            sourceColorSpace: metadata.colorSpace,
+          })
+
+          mediaInfo.videoPreview = videoTranscode
+          continue
+        }
+
         const videoSpec: PrismaJson.VideoTranscode = {
           resolution: res,
           width,
           height,
+          hdr: isHdr,
         }
 
         const videoTranscode = await executeActivity(workerQueue, transcodeVideoActivity, {
@@ -145,13 +180,14 @@ export async function transcodeVideoWorkflow(task: WorkflowTask): Promise<void> 
           hardwareAcceleration: spec.hardwareAcceleration,
           sourceVideoBitrate: metadata.videoBitRate || metadata.bitRate,
           threads: spec.threads,
+          sourceIsHdr: metadata.isHdr,
+          sourceHdrType: metadata.hdrType,
+          sourceColorTransfer: metadata.colorTransfer,
+          sourceColorPrimaries: metadata.colorPrimaries,
+          sourceColorSpace: metadata.colorSpace,
         })
 
-        if (res === '180p') {
-          mediaInfo.videoPreview = videoTranscode
-        } else {
-          mediaInfo.videoTranscodes.push(videoTranscode)
-        }
+        mediaInfo.videoTranscodes.push(videoTranscode)
       }
     }
 

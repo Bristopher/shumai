@@ -50,6 +50,7 @@ declare global {
     // ----------------------------------------------------------------------
     export type VideoTranscodeStrategy = 'best_match' | 'all'
     export type HardwareAcceleration = 'off' | 'auto'
+    export type HdrType = 'pq' | 'hlg' | 'dovi_p5' | 'dovi_p8' | 'sdr'
 
     // ----------------------------------------------------------------------
     // Collection Filter
@@ -104,6 +105,7 @@ declare global {
       width: number
       height: number
       resolution?: string
+      hdr?: boolean
     }
 
     export interface ImageTranscode {
@@ -130,6 +132,7 @@ declare global {
     export interface Metadata {
       originalHeight: number
       originalWidth: number
+      rotation?: number
       hasAudio: boolean
       duration: number
       bitRate: number
@@ -142,6 +145,12 @@ declare global {
       audioChannels?: number
       audioSampleRate?: number
       audioBitDepth?: number
+      colorTransfer?: string
+      colorPrimaries?: string
+      colorSpace?: string
+      isHdr?: boolean
+      hdrType?: HdrType
+      dvProfile?: number
       format: unknown
     }
 

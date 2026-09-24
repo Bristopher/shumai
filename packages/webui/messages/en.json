@@ -265,6 +265,8 @@
   "ffmpeg_threads_description": "Maximum number of CPU threads used by FFmpeg during transcoding. Set to 0 for Auto.",
   "threads_auto": "Auto",
   "threads_count": "{count} threads",
+  "hdr": "HDR",
+  "sdr": "SDR",
 
   "notification_settings": "Notification Settings",
   "notifications_description": "Configure your personal notification preferences for this team.",

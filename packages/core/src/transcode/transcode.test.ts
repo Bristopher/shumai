@@ -7,6 +7,7 @@ import {
   getDefaultBitrateBps,
   calculateMaxBitrate,
   H264_ENCODER_CONFIGS,
+  buildSdrToneMapFilterChain,
 } from './transcode'
 import { s3Service } from '@shumai/core/src/s3/s3'
 import * as path from 'path'
@@ -1811,6 +1812,479 @@ describe('TranscodeService', () => {
         { signal: controller.signal },
         expect.any(Function),
       )
+    })
+  })
+
+  describe('HDR detection, tone mapping, and transcoding', () => {
+    it('buildSdrToneMapFilterChain constructs zscale + tonemap filter chain for PQ and HLG', () => {
+      const available = new Set(['zscale', 'tonemap'])
+      const pqChain = buildSdrToneMapFilterChain({
+        hdrType: 'pq',
+        availableFilters: available,
+      })
+      expect(pqChain).toContain(
+        'setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc',
+      )
+      expect(pqChain).toContain('zscale=tin=smpte2084:pin=bt2020:min=bt2020nc')
+      expect(pqChain).toContain('tonemap=tonemap=hable:desat=0:peak=100')
+      expect(pqChain).toContain('format=yuv420p')
+
+      const hlgChain = buildSdrToneMapFilterChain({
+        hdrType: 'hlg',
+        availableFilters: available,
+      })
+      expect(hlgChain).toContain(
+        'setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc',
+      )
+      expect(hlgChain).toContain('zscale=tin=arib-std-b67:pin=bt2020:min=bt2020nc')
+      expect(hlgChain).toContain('tonemap=tonemap=hable')
+    })
+
+    it('buildSdrToneMapFilterChain throws error if zscale or tonemap is missing for PQ/HLG', () => {
+      expect(() =>
+        buildSdrToneMapFilterChain({
+          hdrType: 'pq',
+          availableFilters: new Set(['zscale']),
+        }),
+      ).toThrow(/zscale and tonemap filters are required for HDR tone mapping/)
+
+      expect(() =>
+        buildSdrToneMapFilterChain({
+          hdrType: 'hlg',
+          availableFilters: new Set(['tonemap']),
+        }),
+      ).toThrow(/zscale and tonemap filters are required for HDR tone mapping/)
+    })
+
+    it('buildSdrToneMapFilterChain constructs zscale + tonemap filter chain for Dolby Vision Profile 5', () => {
+      const chain = buildSdrToneMapFilterChain({
+        hdrType: 'dovi_p5',
+        availableFilters: new Set(['zscale', 'tonemap']),
+      })
+      expect(chain).toContain(
+        'setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc',
+      )
+      expect(chain).toContain('tin=smpte2084')
+      expect(chain).toContain('tonemap=tonemap=hable')
+      expect(chain).toContain('m=bt709')
+    })
+
+    it('buildSdrToneMapFilterChain throws error if zscale or tonemap is missing for Dolby Vision Profile 5', () => {
+      expect(() =>
+        buildSdrToneMapFilterChain({
+          hdrType: 'dovi_p5',
+          availableFilters: new Set(['tonemap']),
+        }),
+      ).toThrow(/zscale and tonemap filters are required for HDR tone mapping/)
+    })
+
+    const mockExecFileStdout = (mockOutput: string) => {
+      ;(
+        child_process.execFile as unknown as {
+          mockImplementation: (
+            fn: (
+              file: string,
+              args: string[],
+              cb: (err: Error | null, res: { stdout: string; stderr: string }) => void,
+            ) => unknown,
+          ) => void
+        }
+      ).mockImplementation((_file, _args, cb) => {
+        cb(null, { stdout: mockOutput, stderr: '' })
+      })
+    }
+
+    it('getVideoInfo detects PQ HDR from smpte2084 color_transfer', async () => {
+      /* eslint-disable @typescript-eslint/naming-convention */
+      const mockOutput = JSON.stringify({
+        format: { duration: '10.0', bit_rate: '20000000' },
+        streams: [
+          {
+            codec_type: 'video',
+            codec_name: 'hevc',
+            width: 3840,
+            height: 2160,
+            r_frame_rate: '24/1',
+            color_transfer: 'smpte2084',
+            color_primaries: 'bt2020',
+            color_space: 'bt2020nc',
+            bits_per_raw_sample: '10',
+          },
+        ],
+      })
+      /* eslint-enable @typescript-eslint/naming-convention */
+
+      mockExecFileStdout(mockOutput)
+
+      const info = await transcodeService.getVideoInfo('hdr-pq.mp4')
+      expect(info.isHdr).toBe(true)
+      expect(info.hdrType).toBe('pq')
+      expect(info.colorTransfer).toBe('smpte2084')
+    })
+
+    it('getVideoInfo detects HLG HDR from arib-std-b67 color_transfer', async () => {
+      /* eslint-disable @typescript-eslint/naming-convention */
+      const mockOutput = JSON.stringify({
+        format: { duration: '10.0', bit_rate: '20000000' },
+        streams: [
+          {
+            codec_type: 'video',
+            codec_name: 'hevc',
+            width: 1920,
+            height: 1080,
+            r_frame_rate: '30/1',
+            color_transfer: 'arib-std-b67',
+            color_primaries: 'bt2020',
+            color_space: 'bt2020nc',
+          },
+        ],
+      })
+      /* eslint-enable @typescript-eslint/naming-convention */
+
+      mockExecFileStdout(mockOutput)
+
+      const info = await transcodeService.getVideoInfo('hdr-hlg.mp4')
+      expect(info.isHdr).toBe(true)
+      expect(info.hdrType).toBe('hlg')
+      expect(info.colorTransfer).toBe('arib-std-b67')
+    })
+
+    it('getVideoInfo treats 10-bit Rec.709 with BT.709 transfer as SDR', async () => {
+      /* eslint-disable @typescript-eslint/naming-convention */
+      const mockOutput = JSON.stringify({
+        format: { duration: '10.0', bit_rate: '20000000' },
+        streams: [
+          {
+            codec_type: 'video',
+            codec_name: 'h264',
+            width: 1920,
+            height: 1080,
+            r_frame_rate: '24/1',
+            color_transfer: 'bt709',
+            color_primaries: 'bt709',
+            color_space: 'bt709',
+            bits_per_raw_sample: '10',
+          },
+        ],
+      })
+      /* eslint-enable @typescript-eslint/naming-convention */
+
+      mockExecFileStdout(mockOutput)
+
+      const info = await transcodeService.getVideoInfo('10bit-sdr.mp4')
+      expect(info.isHdr).toBe(false)
+      expect(info.hdrType).toBe('sdr')
+    })
+
+    it('getVideoInfo detects Dolby Vision Profile 5 via side data', async () => {
+      /* eslint-disable @typescript-eslint/naming-convention */
+      const mockOutput = JSON.stringify({
+        format: { duration: '10.0', bit_rate: '25000000' },
+        streams: [
+          {
+            codec_type: 'video',
+            codec_name: 'hevc',
+            width: 3840,
+            height: 2160,
+            r_frame_rate: '24/1',
+            side_data_list: [
+              {
+                side_data_type: 'DOVI configuration record',
+                dv_profile: 5,
+                dv_level: 6,
+              },
+            ],
+          },
+        ],
+      })
+      /* eslint-enable @typescript-eslint/naming-convention */
+
+      mockExecFileStdout(mockOutput)
+
+      const info = await transcodeService.getVideoInfo('dovi-p5.mp4')
+      expect(info.isHdr).toBe(true)
+      expect(info.hdrType).toBe('dovi_p5')
+      expect(info.dvProfile).toBe(5)
+    })
+
+    it('getVideoInfo treats Dolby Vision Profile 8 with BT.709 transfer as SDR', async () => {
+      /* eslint-disable @typescript-eslint/naming-convention */
+      const mockOutput = JSON.stringify({
+        format: { duration: '10.0', bit_rate: '25000000' },
+        streams: [
+          {
+            codec_type: 'video',
+            codec_name: 'hevc',
+            width: 1920,
+            height: 1080,
+            r_frame_rate: '24/1',
+            color_transfer: 'bt709',
+            color_primaries: 'bt709',
+            color_space: 'bt709',
+            side_data_list: [
+              {
+                side_data_type: 'DOVI configuration record',
+                dv_profile: 8,
+              },
+            ],
+          },
+        ],
+      })
+      /* eslint-enable @typescript-eslint/naming-convention */
+
+      mockExecFileStdout(mockOutput)
+
+      const info = await transcodeService.getVideoInfo('dovi-p8-sdr.mp4')
+      expect(info.isHdr).toBe(false)
+      expect(info.hdrType).toBe('sdr')
+      expect(info.dvProfile).toBe(8)
+    })
+
+    it('getVideoInfo swaps width and height when Display Matrix side data has rotation -90', async () => {
+      /* eslint-disable @typescript-eslint/naming-convention */
+      const mockOutput = JSON.stringify({
+        format: { duration: '10.0', bit_rate: '20000000' },
+        streams: [
+          {
+            codec_type: 'video',
+            codec_name: 'hevc',
+            width: 1920,
+            height: 1080,
+            r_frame_rate: '30/1',
+            side_data_list: [
+              {
+                side_data_type: 'Display Matrix',
+                rotation: -90,
+              },
+            ],
+          },
+        ],
+      })
+      /* eslint-enable @typescript-eslint/naming-convention */
+
+      mockExecFileStdout(mockOutput)
+
+      const info = await transcodeService.getVideoInfo('vertical-display-matrix.mp4')
+      expect(info.originalWidth).toBe(1080)
+      expect(info.originalHeight).toBe(1920)
+      expect(info.rotation).toBe(-90)
+    })
+
+    it('getVideoInfo swaps width and height when tags.rotate is 90 or 270', async () => {
+      /* eslint-disable @typescript-eslint/naming-convention */
+      const mockOutput = JSON.stringify({
+        format: { duration: '10.0', bit_rate: '20000000' },
+        streams: [
+          {
+            codec_type: 'video',
+            codec_name: 'h264',
+            width: 1920,
+            height: 1080,
+            r_frame_rate: '30/1',
+            tags: {
+              rotate: '90',
+            },
+          },
+        ],
+      })
+      /* eslint-enable @typescript-eslint/naming-convention */
+
+      mockExecFileStdout(mockOutput)
+
+      const info = await transcodeService.getVideoInfo('vertical-tag.mp4')
+      expect(info.originalWidth).toBe(1080)
+      expect(info.originalHeight).toBe(1920)
+      expect(info.rotation).toBe(90)
+    })
+
+    it('getVideoInfo preserves width and height when rotation is 180 degrees', async () => {
+      /* eslint-disable @typescript-eslint/naming-convention */
+      const mockOutput = JSON.stringify({
+        format: { duration: '10.0', bit_rate: '20000000' },
+        streams: [
+          {
+            codec_type: 'video',
+            codec_name: 'h264',
+            width: 1920,
+            height: 1080,
+            r_frame_rate: '30/1',
+            tags: {
+              rotate: '180',
+            },
+          },
+        ],
+      })
+      /* eslint-enable @typescript-eslint/naming-convention */
+
+      mockExecFileStdout(mockOutput)
+
+      const info = await transcodeService.getVideoInfo('upside-down.mp4')
+      expect(info.originalWidth).toBe(1920)
+      expect(info.originalHeight).toBe(1080)
+      expect(info.rotation).toBe(180)
+    })
+
+    it('transcodeVideo preserves HDR parameters and tags when hdr is true', async () => {
+      let executedArgs: string[] = []
+      ;(
+        child_process.execFile as unknown as {
+          mockImplementation: (
+            fn: (
+              file: string,
+              args: string[],
+              cb: (err: Error | null, res: { stdout: string; stderr: string }) => void,
+            ) => unknown,
+          ) => void
+        }
+      ).mockImplementation((_file, args, cb) => {
+        if (args.includes('-filters')) {
+          cb(null, { stdout: ' ... zscale ... \n ... tonemap ... ', stderr: '' })
+          return {}
+        }
+        if (args.includes('-encoders')) {
+          cb(null, { stdout: ' V..... libx264 ', stderr: '' })
+          return {}
+        }
+        executedArgs = args
+        cb(null, { stdout: '', stderr: '' })
+        return {}
+      })
+
+      const outputFile = path.join(tempDir, 'hdr_output.mp4')
+      await transcodeService.transcodeVideo({
+        inputFile: 'hdr_input.mp4',
+        outputFile,
+        width: 1920,
+        height: 1080,
+        hdr: true,
+        sourceIsHdr: true,
+        sourceHdrType: 'pq',
+        sourceColorTransfer: 'smpte2084',
+      })
+
+      expect(executedArgs).toContain('-color_primaries')
+      expect(executedArgs).toContain('bt2020')
+      expect(executedArgs).toContain('-color_trc')
+      expect(executedArgs).toContain('smpte2084')
+      expect(executedArgs).toContain('-colorspace')
+      expect(executedArgs).toContain('bt2020nc')
+      expect(executedArgs).toContain('-x264-params')
+      expect(executedArgs).toContain('colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc')
+    })
+
+    it('transcodeVideo transcodes Dolby Vision Profile 5 to HDR proxy without libplacebo', async () => {
+      let executedArgs: string[] = []
+      ;(
+        child_process.execFile as unknown as {
+          mockImplementation: (
+            fn: (
+              file: string,
+              args: string[],
+              cb: (err: Error | null, res: { stdout: string; stderr: string }) => void,
+            ) => unknown,
+          ) => void
+        }
+      ).mockImplementation((_file, args, cb) => {
+        if (args.includes('-filters')) {
+          cb(null, { stdout: ' ... zscale ... \n ... tonemap ... ', stderr: '' })
+          return {}
+        }
+        if (args.includes('-encoders')) {
+          cb(null, { stdout: ' V..... libx264 ', stderr: '' })
+          return {}
+        }
+        executedArgs = args
+        cb(null, { stdout: '', stderr: '' })
+        return {}
+      })
+
+      const outputFile = path.join(tempDir, 'dovi_p5_hdr.mp4')
+      await transcodeService.transcodeVideo({
+        inputFile: 'dovi_p5_input.mp4',
+        outputFile,
+        width: 1920,
+        height: 1080,
+        hdr: true,
+        sourceIsHdr: true,
+        sourceHdrType: 'dovi_p5',
+      })
+
+      const filterIdx = executedArgs.indexOf('-filter_complex')
+      expect(filterIdx).toBeGreaterThan(-1)
+      const filterComplex = executedArgs[filterIdx + 1]
+      expect(filterComplex).not.toContain('libplacebo')
+      expect(executedArgs).toContain('-color_primaries')
+      expect(executedArgs).toContain('bt2020')
+      expect(executedArgs).toContain('-color_trc')
+      expect(executedArgs).toContain('smpte2084')
+    })
+
+    it('generateSprite uses split=2 filterComplex for HDR inputs', async () => {
+      let executedArgs: string[] = []
+      ;(
+        child_process.execFile as unknown as {
+          mockImplementation: (
+            fn: (
+              file: string,
+              args: string[],
+              cb: (err: Error | null, res: { stdout: string; stderr: string }) => void,
+            ) => unknown,
+          ) => void
+        }
+      ).mockImplementation((_file, args, cb) => {
+        if (args.includes('-filters')) {
+          cb(null, { stdout: ' ... zscale ... \n ... tonemap ... ', stderr: '' })
+          return {}
+        }
+        executedArgs = args
+        cb(null, { stdout: '', stderr: '' })
+        return {}
+      })
+
+      const spritePath = path.join(tempDir, 'sprite.webp')
+      const posterPath = path.join(tempDir, 'poster.webp')
+      await transcodeService.generateSprite('input.mp4', spritePath, posterPath, 100, undefined, {
+        isHdr: true,
+        hdrType: 'pq',
+        colorTransfer: 'smpte2084',
+      })
+
+      const filterIdx = executedArgs.indexOf('-filter_complex')
+      expect(filterIdx).toBeGreaterThan(-1)
+      const filterStr = executedArgs[filterIdx + 1]
+      expect(filterStr).toContain('split=2[v_sprite][v_thumb]')
+      expect(filterStr).toContain('[v_sprite]fps=')
+      expect(filterStr).toContain('[v_thumb]scale=')
+    })
+
+    it('generateSprite uses split=2 filterComplex for SDR inputs', async () => {
+      let executedArgs: string[] = []
+      ;(
+        child_process.execFile as unknown as {
+          mockImplementation: (
+            fn: (
+              file: string,
+              args: string[],
+              cb: (err: Error | null, res: { stdout: string; stderr: string }) => void,
+            ) => unknown,
+          ) => void
+        }
+      ).mockImplementation((_file, args, cb) => {
+        executedArgs = args
+        cb(null, { stdout: '', stderr: '' })
+        return {}
+      })
+
+      const spritePath = path.join(tempDir, 'sprite.webp')
+      const posterPath = path.join(tempDir, 'poster.webp')
+      await transcodeService.generateSprite('input.mp4', spritePath, posterPath, 100)
+
+      const filterIdx = executedArgs.indexOf('-filter_complex')
+      expect(filterIdx).toBeGreaterThan(-1)
+      const filterStr = executedArgs[filterIdx + 1]
+      expect(filterStr).toContain('[0:v]split=2[v_sprite][v_thumb]')
+      expect(filterStr).toContain('[v_sprite]fps=')
+      expect(filterStr).toContain('[v_thumb]scale=')
     })
   })
 })

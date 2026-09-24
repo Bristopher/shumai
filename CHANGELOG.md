@@ -8,10 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **transcode**: Add HDR video proxy support: HDR videos automatically generate HDR video proxies and preview videos preserving HDR color characteristics, tone-mapped SDR thumbnails and posters, and automatic HDR player playback on supported displays with hardware EDR acceleration
 - **docs**: Add a Changelog section to the documentation site so users can explore release notes and updates directly in Mintlify
 
 ### Fixed
 
+- **transcode**: Fix an issue where videos with orientation or rotation metadata (such as smartphone vertical videos) were incorrectly displayed with stretched aspect ratios in the video player
 - **docker**: Fix an issue where the bundled PostgreSQL container published port 5432 on the host, causing deployment to fail on machines where that port was already in use; the database is now only reachable by Shumai itself
 - **cli**: Only manage and check PID files in daemon mode, preventing stale PID files, crash-loop conflicts, or spurious process checks during normal foreground and Docker execution
 
