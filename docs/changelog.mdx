@@ -3,6 +3,24 @@ title: "Changelog"
 description: "Recent updates, new features, and improvements in Shumai"
 ---
 
+<Update label="v0.4.9" description="September 28, 2026">
+
+### Added
+
+- **notification**: You can now receive notifications via email, with batched digest emails and configurable team-level SMTP settings
+- **transcode**: Add VA-API hardware acceleration support for Linux hosts and Docker environments with Intel and AMD GPUs, featuring automatic DRI render node discovery, variable bitrate control, and structured transcoding observability logs
+- **transcode**: Add automatic fallback to software transcoding (libx264) when hardware-accelerated video encoding encounters GPU resolution constraints or runtime driver errors
+- **docker**: Add modular hardware-accelerated transcoding presets matching Immich's compose configuration via `hwaccel.transcoding.yaml` with support for NVENC, QuickSync, RKMPP, and VA-API
+
+### Fixed
+
+### Changed
+
+- **transcode**: Improve video poster selection using intelligent scene detection and color variance filtering to automatically skip black frames, fade-ins, and blank intros in favor of representative video content
+- **transcode**: Optimize video sprite generation for large and long videos using a concurrent fast-seek pool and image compositing, avoiding full-video decoding while preserving instant single-pass generation for short clips
+
+</Update>
+
 <Update label="v0.4.8" description="September 24, 2026">
 
 ### Added

@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+### Fixed
+
+### Changed
+
+## [0.4.9] - 2026-09-28
+
+### Added
+
 - **notification**: You can now receive notifications via email, with batched digest emails and configurable team-level SMTP settings
 - **transcode**: Add VA-API hardware acceleration support for Linux hosts and Docker environments with Intel and AMD GPUs, featuring automatic DRI render node discovery, variable bitrate control, and structured transcoding observability logs
 - **transcode**: Add automatic fallback to software transcoding (libx264) when hardware-accelerated video encoding encounters GPU resolution constraints or runtime driver errors
