@@ -544,7 +544,15 @@ describe('EmailService', () => {
         ],
       })
 
-      expect(rendered.subject).toBe('[Shumai] 2 new notifications in Designers')
+      expect(rendered.subject).toBe('[Shumai] 2 new notifications')
+      expect(rendered.html).toContain('You have 2 new updates:')
+      expect(rendered.html).not.toContain('in <strong>Designers</strong>')
+      expect(rendered.html).toContain('Open Shumai')
+      expect(rendered.html).not.toContain('Open Designers')
+      expect(rendered.html).not.toContain('Team: Designers')
+      expect(rendered.text).toContain('You have 2 new update(s):')
+      expect(rendered.text).toContain('Open Shumai:')
+      expect(rendered.text).not.toContain('Team: Designers')
       expect(rendered.html).toContain('img1.png')
       expect(rendered.html).toContain('img2.png')
       // img1 has thumbnail, img2 does not
@@ -576,7 +584,7 @@ describe('EmailService', () => {
         items,
       })
 
-      expect(rendered.subject).toBe('[Shumai] 5 new notifications in Designers')
+      expect(rendered.subject).toBe('[Shumai] 5 new notifications')
       expect(rendered.html).toContain('Alice uploaded 5 assets to Website Redesign')
       // Thumbnails must be omitted for collapsed groups (> 3)
       expect(rendered.html).not.toContain('https://example.com/thumb_')
@@ -621,7 +629,7 @@ describe('EmailService', () => {
         items: [...commentItems, uploadItem],
       })
 
-      expect(rendered.subject).toBe('[Shumai] 5 new notifications in Designers')
+      expect(rendered.subject).toBe('[Shumai] 5 new notifications')
       // Collapsed comment group
       expect(rendered.html).toContain('UserB left 4 comments in Project Alpha')
       // Detailed upload item with thumbnail

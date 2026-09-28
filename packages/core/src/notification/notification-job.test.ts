@@ -98,7 +98,7 @@ describe('NotificationJobService', () => {
       expect.objectContaining({ host: 'smtp.test.com' }),
       expect.objectContaining({
         to: 'bob@test.com',
-        subject: '[Shumai] 2 new notifications in Email Team',
+        subject: '[Shumai] 2 new notifications',
       }),
     )
 
@@ -341,7 +341,7 @@ describe('NotificationJobService', () => {
     expect(sendMailSpy).toHaveBeenCalledTimes(1)
     const call = sendMailSpy.mock.calls[0]
     expect(call[1].to).toBe('recip@test.com')
-    expect(call[1].subject).toBe('[Shumai] 6 new notifications in Email Team')
+    expect(call[1].subject).toBe('[Shumai] 6 new notifications')
     // Uploads collapsed into 1 row because count > 3
     expect(call[1].html).toContain('UserB uploaded 5 assets to Project Alpha')
     // Comment rendered as individual row

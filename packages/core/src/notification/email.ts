@@ -323,7 +323,7 @@ Sent from Shumai at ${baseUrl}
       actionText = 'View Task'
     } else if (ctx.teamId) {
       actionUrl = `${baseUrl}/teams/${ctx.teamId}`
-      actionText = 'Open Team'
+      actionText = 'Open Shumai'
     }
 
     let subject = '[Shumai] Notification'
@@ -496,7 +496,7 @@ Sent from Shumai at ${baseUrl}
       <a href="${actionUrl}" class="btn">${escapeHtml(actionText)}</a>
     </div>
     <div class="footer">
-      Team: ${escapeHtml(ctx.teamName)} &bull; Sent from <a href="${baseUrl}" style="color: #6366f1; text-decoration: none;">Shumai</a>
+      Sent from <a href="${baseUrl}" style="color: #6366f1; text-decoration: none;">Shumai</a>
     </div>
   </div>
 </body>
@@ -509,8 +509,7 @@ ${subject}
 ${headline}
 ${formattedUploadTime ? `Uploaded at: ${formattedUploadTime}\n` : ''}${detail ? `\n${detail}\n` : ''}
 ${actionText}: ${actionUrl}
-
-Team: ${ctx.teamName}
+Sent from Shumai at ${baseUrl}
 `.trim()
 
     return { subject, html, text }
@@ -526,14 +525,14 @@ Team: ${ctx.teamName}
 
     if (ctx.items.length === 0) {
       return {
-        subject: `[Shumai] Notifications in ${ctx.teamName}`,
+        subject: `[Shumai] Notifications`,
         html: `<p>No new notifications.</p>`,
         text: `No new notifications.`,
       }
     }
 
     // Determine subject
-    let subject = `[Shumai] ${ctx.items.length} new notifications in ${ctx.teamName}`
+    let subject = `[Shumai] ${ctx.items.length} new notifications`
     if (ctx.items.length === 1) {
       const single = ctx.items[0]
       const actor = single.creatorName || 'Someone'
@@ -563,7 +562,7 @@ Team: ${ctx.teamName}
           break
         }
         default:
-          subject = `[Shumai] 1 new notification in ${ctx.teamName}`
+          subject = `[Shumai] 1 new notification`
           break
       }
     }
@@ -718,15 +717,15 @@ Team: ${ctx.teamName}
 <body>
   <div class="container">
     <div class="header">Shumai Notifications</div>
-    <div class="subtitle">You have ${ctx.items.length} new update${ctx.items.length > 1 ? 's' : ''} in <strong>${escapeHtml(ctx.teamName)}</strong>:</div>
+    <div class="subtitle">You have ${ctx.items.length} new update${ctx.items.length > 1 ? 's' : ''}:</div>
     <div>
       ${htmlRows.join('\n')}
     </div>
     <div style="text-align: center; margin-top: 20px;">
-      <a href="${teamUrl}" class="btn">Open ${escapeHtml(ctx.teamName)}</a>
+      <a href="${teamUrl}" class="btn">Open Shumai</a>
     </div>
     <div class="footer">
-      Team: ${escapeHtml(ctx.teamName)} &bull; Sent from <a href="${baseUrl}" style="color: #6366f1; text-decoration: none;">Shumai</a>
+      Sent from <a href="${baseUrl}" style="color: #6366f1; text-decoration: none;">Shumai</a>
     </div>
   </div>
 </body>
@@ -736,11 +735,11 @@ Team: ${ctx.teamName}
     const text = `
 Shumai Notifications
 
-You have ${ctx.items.length} new update(s) in ${ctx.teamName}:
+You have ${ctx.items.length} new update(s):
 
 ${textRows.join('\n\n')}
 
-Open Team: ${teamUrl}
+Open Shumai: ${teamUrl}
 Sent from Shumai at ${baseUrl}
 `.trim()
 
@@ -854,7 +853,7 @@ function getItemAction(
   } else if (item.teamId) {
     return {
       url: `${baseUrl}/teams/${item.teamId}`,
-      text: 'Open Team',
+      text: 'Open Shumai',
     }
   }
   return { url: baseUrl, text: 'Open Shumai' }
