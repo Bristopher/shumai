@@ -85,10 +85,23 @@ declare global {
       hideAgent?: boolean
     }
 
+    export interface EmailNotificationSettings {
+      enabled: boolean
+      host?: string
+      port?: number
+      username?: string
+      password?: string
+      smtps?: boolean
+      ignoreCert?: boolean
+      from?: string
+      replyTo?: string
+    }
+
     export interface Settings {
-      transcode: TranscodeSettings
+      transcode?: TranscodeSettings
       mediaGeneration?: MediaGenerationSettings
       appearance?: AppearanceSettings
+      emailNotification?: EmailNotificationSettings
     }
 
     // ----------------------------------------------------------------------
