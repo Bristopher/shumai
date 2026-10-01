@@ -9,7 +9,7 @@ import { useAuthStore } from '@/ui/stores/auth'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery } from '@tanstack/react-query'
 import { createFileRoute, redirect, useNavigate } from '@tanstack/react-router'
-import { ArrowRight, Loader2, Lock, LogIn, Mail } from 'lucide-react'
+import { ArrowRight, Loader2, Lock, LogIn, Mail, UserCheck } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { z } from 'zod'
@@ -27,6 +27,7 @@ function LoginPage() {
   const setUser = useAuthStore((state) => state.setUser)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [demoLoading, setDemoLoading] = useState(false)
 
   const { data: signupInfo, isLoading: isSignupInfoLoading } = useQuery({
     queryKey: ['/signup-info'],
@@ -69,6 +70,30 @@ function LoginPage() {
     }
   }
 
+  const onDemoLogin = async () => {
+    setDemoLoading(true)
+    setError(null)
+    form.clearErrors()
+    form.setValue('email', 'foo@bar.com')
+    form.setValue('password', 'foo')
+
+    const { data: session, error: signInError } = await signIn.email({
+      email: 'foo@bar.com',
+      password: 'foo',
+    })
+
+    setDemoLoading(false)
+    if (signInError) {
+      setError(signInError.message || m.invalid_credentials())
+      return
+    }
+
+    if (session) {
+      setUser(session.user)
+      navigate({ to: '/' })
+    }
+  }
+
   if (isSignupInfoLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-zinc-100/80 dark:bg-black">
@@ -88,14 +113,6 @@ function LoginPage() {
         </h1>
         <p className="text-zinc-500 dark:text-zinc-400 text-sm mt-1">{m.login_subtitle()}</p>
       </div>
-
-      {isDemoEnv && (
-        <div className="mb-6 p-4 bg-blue-500/10 border border-blue-500/20 text-blue-700 dark:text-blue-400 rounded-xl text-sm leading-relaxed">
-          <p>
-            <strong>{m.demo_access()}</strong> {m.demo_access_instructions()}
-          </p>
-        </div>
-      )}
 
       {error && (
         <div className="mb-6 p-3 bg-red-500/10 border border-red-500/20 text-red-600 dark:text-red-400 rounded-xl text-sm text-center font-medium">
@@ -155,7 +172,7 @@ function LoginPage() {
         <Button
           type="submit"
           className="w-full h-11 bg-gradient-to-r from-rose-500 to-orange-500 hover:from-rose-600 hover:to-orange-600 text-white font-semibold rounded-xl shadow-md shadow-rose-500/10 hover:shadow-rose-500/20 active:scale-[0.98] transition-all flex items-center justify-center gap-2 border-0"
-          disabled={loading}
+          disabled={loading || demoLoading}
         >
           {loading ? (
             <>
@@ -170,6 +187,47 @@ function LoginPage() {
           )}
         </Button>
       </form>
+
+      {isDemoEnv && (
+        <div className="mt-4 space-y-4">
+          <div className="relative">
+            <div className="absolute inset-0 flex items-center">
+              <span className="w-full border-t border-zinc-200/80 dark:border-zinc-800" />
+            </div>
+            <div className="relative flex justify-center text-xs uppercase">
+              <span className="bg-white dark:bg-zinc-900 px-2 text-zinc-400 dark:text-zinc-500 font-medium">
+                {m.or()}
+              </span>
+            </div>
+          </div>
+
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onDemoLogin}
+            disabled={loading || demoLoading}
+            className="w-full h-11 border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-800 font-semibold rounded-xl transition-all flex items-center justify-center gap-2 shadow-xs cursor-pointer"
+          >
+            {demoLoading ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                {m.logging_in()}
+              </>
+            ) : (
+              <>
+                <UserCheck className="w-4 h-4 text-zinc-500 dark:text-zinc-400" />
+                {m.login_as_demo_user()}
+              </>
+            )}
+          </Button>
+
+          <div className="p-3 bg-blue-500/10 border border-blue-500/20 text-blue-700 dark:text-blue-400 rounded-xl text-xs leading-relaxed text-center">
+            <p>
+              <strong>{m.demo_access()}</strong> {m.demo_access_instructions()}
+            </p>
+          </div>
+        </div>
+      )}
 
       <div className="mt-8 pt-6 border-t border-zinc-200/30 dark:border-zinc-800/30 text-center text-sm">
         <span className="text-zinc-500 dark:text-zinc-400">{m.no_account_prompt()}</span>
