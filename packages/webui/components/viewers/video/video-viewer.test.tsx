@@ -495,4 +495,75 @@ describe('VideoViewer', () => {
       vi.useRealTimers()
     }
   })
+
+  it('displays 2160p instead of 3840p for 4K vertical video when HLS switches level on Auto', () => {
+    mockHlsInstance.levels = [{ height: 3840, width: 2160, bitrate: 10000000 }]
+
+    const hlsVideo: AssetInfo = {
+      id: 'video-hls-vertical-4k',
+      name: 'vertical-4k.m3u8',
+      proxyType: 'video',
+      media: {
+        isHls: true,
+        hls: {
+          key: 'hls-key',
+          url: 'https://cdn.example.com/master.m3u8',
+          resolutions: [{ width: 2160, height: 3840, resolution: '2160p' }],
+        },
+        metadata: {
+          originalWidth: 2160,
+          originalHeight: 3840,
+          duration: 10,
+          frameRate: 30,
+          totalFrames: 300,
+        },
+      },
+    } as unknown as AssetInfo
+
+    const { container } = render(<VideoViewer file={hlsVideo} />)
+
+    const levelSwitchedHandler = mockHlsInstance.on.mock.calls.find(
+      ([event]) => event === 'hlsLevelSwitched',
+    )?.[1]
+    expect(levelSwitchedHandler).toBeDefined()
+
+    act(() => {
+      levelSwitchedHandler('hlsLevelSwitched', { level: 0 })
+    })
+
+    const settingsButton = container.querySelector('button:has(.lucide-settings)')
+    expect(settingsButton?.textContent).toContain('2160p')
+    expect(settingsButton?.textContent).not.toContain('3840p')
+  })
+
+  it('derives resolution from long side for legacy portrait MP4 transcode without explicit resolution', () => {
+    const legacyPortraitVideo: AssetInfo = {
+      id: 'legacy-portrait-mp4',
+      name: 'portrait.mp4',
+      proxyType: 'video',
+      media: {
+        videoTranscodes: [
+          {
+            key: 'portrait-1080p.mp4',
+            url: 'https://cdn.example.com/portrait-1080p.mp4',
+            width: 1080,
+            height: 1920,
+            size: 5000000,
+          },
+        ],
+        metadata: {
+          originalWidth: 1080,
+          originalHeight: 1920,
+          duration: 10,
+          frameRate: 30,
+          totalFrames: 300,
+        },
+      },
+    } as unknown as AssetInfo
+
+    const { container } = render(<VideoViewer file={legacyPortraitVideo} />)
+    const settingsButton = container.querySelector('button:has(.lucide-settings)')
+    expect(settingsButton?.textContent).toContain('1080p')
+    expect(settingsButton?.textContent).not.toContain('1920p')
+  })
 })

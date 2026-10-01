@@ -1,6 +1,8 @@
 import { createLazyFileRoute } from '@tanstack/react-router'
 import {
   VideoTranscodeStrategy,
+  VideoResolutionLadder,
+  DEFAULT_VIDEO_RESOLUTIONS,
   HardwareAcceleration,
   UpdateTeamSettingsRequest,
   TeamSettingsResponse,
@@ -97,7 +99,7 @@ function getTabFromHash(): SettingsTab {
     : 'general'
 }
 
-function TeamSettingsPage() {
+export function TeamSettingsPage() {
   const { teamId } = Route.useParams()
   const queryClient = useQueryClient()
   const [activeTab, setActiveTabState] = useState<SettingsTab>(getTabFromHash)
@@ -297,6 +299,10 @@ function TeamSettingsPage() {
       queryClient.invalidateQueries({
         queryKey: ['teams', teamId, 'settings'],
       })
+      toast.success(m.settings_updated())
+    },
+    onError: () => {
+      toast.error(m.failed_update_settings())
     },
   })
 
@@ -308,6 +314,102 @@ function TeamSettingsPage() {
         value: value,
       },
     })
+  }
+
+  const pendingVideoResolutionsRef = useRef<VideoResolutionLadder[] | null>(null)
+  const [optimisticVideoResolutions, setOptimisticVideoResolutions] = useState<
+    VideoResolutionLadder[] | null
+  >(null)
+  const videoResolutionsQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const isVideoResolutionsUpdatingRef = useRef<boolean>(false)
+
+  const pendingHlsResolutionsRef = useRef<HlsResolutionLadder[] | null>(null)
+  const [optimisticHlsResolutions, setOptimisticHlsResolutions] = useState<
+    HlsResolutionLadder[] | null
+  >(null)
+  const hlsResolutionsQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const isHlsResolutionsUpdatingRef = useRef<boolean>(false)
+
+  useEffect(() => {
+    if (!isVideoResolutionsUpdatingRef.current) {
+      pendingVideoResolutionsRef.current = null
+      setOptimisticVideoResolutions(null)
+    }
+  }, [settings])
+
+  useEffect(() => {
+    if (!isHlsResolutionsUpdatingRef.current) {
+      pendingHlsResolutionsRef.current = null
+      setOptimisticHlsResolutions(null)
+    }
+  }, [settings])
+
+  const handleVideoLadderToggle = (ladder: VideoResolutionLadder) => {
+    const current =
+      pendingVideoResolutionsRef.current ??
+      optimisticVideoResolutions ??
+      (settings as TeamSettingsResponse | undefined)?.transcode?.videoResolutions ??
+      DEFAULT_VIDEO_RESOLUTIONS
+    const updated = current.includes(ladder)
+      ? current.filter((l) => l !== ladder)
+      : [...current, ladder]
+
+    if (updated.length === 0) return
+
+    pendingVideoResolutionsRef.current = updated
+    setOptimisticVideoResolutions(updated)
+
+    queryClient.setQueryData(
+      ['teams', teamId, 'settings'],
+      (old: TeamSettingsResponse | undefined) => {
+        if (!old) return old
+        return {
+          ...old,
+          transcode: {
+            ...old.transcode,
+            videoResolutions: updated,
+          },
+        }
+      },
+    )
+
+    isVideoResolutionsUpdatingRef.current = true
+
+    videoResolutionsQueueRef.current = videoResolutionsQueueRef.current
+      .then(async () => {
+        const target = pendingVideoResolutionsRef.current
+        if (!target) return
+
+        const res = await client.api.teams[':teamId'].settings.$patch({
+          param: { teamId },
+          json: {
+            key: 'transcode.videoResolutions',
+            value: target,
+          },
+        })
+        if (!res.ok) throw new Error('Failed to update settings')
+        await res.json()
+
+        if (pendingVideoResolutionsRef.current === target) {
+          pendingVideoResolutionsRef.current = null
+          isVideoResolutionsUpdatingRef.current = false
+          setOptimisticVideoResolutions(null)
+          await queryClient.invalidateQueries({
+            queryKey: ['teams', teamId, 'settings'],
+          })
+          toast.success(m.settings_updated())
+        }
+      })
+      .catch((err) => {
+        console.error(err)
+        pendingVideoResolutionsRef.current = null
+        isVideoResolutionsUpdatingRef.current = false
+        setOptimisticVideoResolutions(null)
+        queryClient.invalidateQueries({
+          queryKey: ['teams', teamId, 'settings'],
+        })
+        toast.error(m.failed_update_settings())
+      })
   }
 
   const handleHardwareAccelerationChange = (value: HardwareAcceleration) => {
@@ -349,6 +451,8 @@ function TeamSettingsPage() {
 
   const handleHlsLadderToggle = (ladder: HlsResolutionLadder) => {
     const current =
+      pendingHlsResolutionsRef.current ??
+      optimisticHlsResolutions ??
       (settings as TeamSettingsResponse | undefined)?.transcode?.hlsResolutions ??
       DEFAULT_HLS_RESOLUTIONS
     const updated = current.includes(ladder)
@@ -357,13 +461,60 @@ function TeamSettingsPage() {
 
     if (updated.length === 0) return
 
-    updateSettings({
-      teamId,
-      data: {
-        key: 'transcode.hlsResolutions',
-        value: updated,
+    pendingHlsResolutionsRef.current = updated
+    setOptimisticHlsResolutions(updated)
+
+    queryClient.setQueryData(
+      ['teams', teamId, 'settings'],
+      (old: TeamSettingsResponse | undefined) => {
+        if (!old) return old
+        return {
+          ...old,
+          transcode: {
+            ...old.transcode,
+            hlsResolutions: updated,
+          },
+        }
       },
-    })
+    )
+
+    isHlsResolutionsUpdatingRef.current = true
+
+    hlsResolutionsQueueRef.current = hlsResolutionsQueueRef.current
+      .then(async () => {
+        const target = pendingHlsResolutionsRef.current
+        if (!target) return
+
+        const res = await client.api.teams[':teamId'].settings.$patch({
+          param: { teamId },
+          json: {
+            key: 'transcode.hlsResolutions',
+            value: target,
+          },
+        })
+        if (!res.ok) throw new Error('Failed to update settings')
+        await res.json()
+
+        if (pendingHlsResolutionsRef.current === target) {
+          pendingHlsResolutionsRef.current = null
+          isHlsResolutionsUpdatingRef.current = false
+          setOptimisticHlsResolutions(null)
+          await queryClient.invalidateQueries({
+            queryKey: ['teams', teamId, 'settings'],
+          })
+          toast.success(m.settings_updated())
+        }
+      })
+      .catch((err) => {
+        console.error(err)
+        pendingHlsResolutionsRef.current = null
+        isHlsResolutionsUpdatingRef.current = false
+        setOptimisticHlsResolutions(null)
+        queryClient.invalidateQueries({
+          queryKey: ['teams', teamId, 'settings'],
+        })
+        toast.error(m.failed_update_settings())
+      })
   }
 
   if (isSettingsLoading || isMeLoading) {
@@ -383,9 +534,19 @@ function TeamSettingsPage() {
     (settings as any)?.transcode?.videoStrategy || VideoTranscodeStrategy.best_match
   if (currentVideoStrategy === 'single' || currentVideoStrategy === 'disable') {
     currentVideoStrategy = VideoTranscodeStrategy.best_match
-  } else if (currentVideoStrategy === 'full') {
-    currentVideoStrategy = VideoTranscodeStrategy.all
+  } else if (
+    currentVideoStrategy === 'full' ||
+    currentVideoStrategy === 'all' ||
+    currentVideoStrategy === 'multi'
+  ) {
+    currentVideoStrategy = VideoTranscodeStrategy.multi
   }
+
+  const currentVideoResolutions: VideoResolutionLadder[] =
+    optimisticVideoResolutions ??
+    (settings as TeamSettingsResponse | undefined)?.transcode?.videoResolutions ??
+    DEFAULT_VIDEO_RESOLUTIONS
+  const ALL_VIDEO_LADDERS: VideoResolutionLadder[] = ['480p', '720p', '1080p', '1440p', '2160p']
 
   const currentHardwareAcceleration =
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -395,6 +556,7 @@ function TeamSettingsPage() {
   const currentHlsEnabled =
     (settings as TeamSettingsResponse | undefined)?.transcode?.hlsEnabled ?? false
   const currentHlsResolutions: HlsResolutionLadder[] =
+    optimisticHlsResolutions ??
     (settings as TeamSettingsResponse | undefined)?.transcode?.hlsResolutions ??
     DEFAULT_HLS_RESOLUTIONS
   const ALL_HLS_LADDERS: HlsResolutionLadder[] = ['480p', '720p', '1080p', '1440p', '2160p']
@@ -842,17 +1004,47 @@ function TeamSettingsPage() {
                           <div
                             className={cn(
                               'cursor-pointer rounded-lg border p-4 transition-all hover:border-primary',
-                              currentVideoStrategy === VideoTranscodeStrategy.all
+                              currentVideoStrategy === VideoTranscodeStrategy.multi
                                 ? 'border-primary bg-primary/5'
                                 : 'border-border',
                             )}
-                            onClick={() => handleVideoStrategyChange(VideoTranscodeStrategy.all)}
+                            onClick={() => handleVideoStrategyChange(VideoTranscodeStrategy.multi)}
                           >
-                            <div className="font-semibold">{m.all_resolutions()}</div>
+                            <div className="font-semibold">{m.multi_resolutions()}</div>
                             <div className="text-sm text-muted-foreground">
-                              {m.all_resolutions_description()}
+                              {m.multi_resolutions_description()}
                             </div>
                           </div>
+
+                          {currentVideoStrategy === VideoTranscodeStrategy.multi && (
+                            <div className="space-y-3 pt-2 pl-1">
+                              <div className="space-y-1">
+                                <h4 className="text-sm font-medium">
+                                  {m.video_resolution_ladders()}
+                                </h4>
+                                <p className="text-xs text-muted-foreground">
+                                  {m.video_resolution_ladders_description()}
+                                </p>
+                              </div>
+                              <div className="flex flex-wrap gap-4 pt-1">
+                                {ALL_VIDEO_LADDERS.map((ladder) => {
+                                  const checked = currentVideoResolutions.includes(ladder)
+                                  return (
+                                    <label
+                                      key={ladder}
+                                      className="flex items-center space-x-2 cursor-pointer text-sm"
+                                    >
+                                      <Checkbox
+                                        checked={checked}
+                                        onCheckedChange={() => handleVideoLadderToggle(ladder)}
+                                      />
+                                      <span>{ladder}</span>
+                                    </label>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       </div>
 

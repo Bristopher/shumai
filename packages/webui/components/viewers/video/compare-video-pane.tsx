@@ -11,6 +11,7 @@ import { useFramePlayer } from './use-frame-player'
 import { calculateFrameCenterTime, resolveTotalFrames } from './utils'
 import { clampFrame as clampFrameUtil } from '../../compare/compare-utils'
 import type { ComparePaneHandle, DisplayTranscode, PaneReportedState } from '../../compare/types'
+import { getVideoResolutionLabel } from '@/ui/lib/media'
 
 interface CompareVideoPaneProps {
   file: AssetInfo
@@ -36,20 +37,10 @@ function computeResolutions(file: AssetInfo): DisplayTranscode[] {
     ? (file.media?.hls?.resolutions ?? [])
     : (file.media?.videoTranscodes ?? [])
 
-  return baseTranscodes.map((t) => {
-    const longSide = Math.max(t.width, t.height)
-    const resCandidate = 'resolution' in t && t.resolution ? t.resolution : undefined
-    let resolution = resCandidate || `${t.height}p`
-    if (!resCandidate) {
-      if (longSide >= 3840) resolution = '2160p'
-      else if (longSide >= 1920) resolution = '1080p'
-      else if (longSide >= 1280) resolution = '720p'
-      else if (longSide >= 960) resolution = '540p'
-      else if (longSide >= 640) resolution = '360p'
-      else if (longSide >= 320) resolution = '180p'
-    }
-    return { ...t, resolution }
-  })
+  return baseTranscodes.map((t) => ({
+    ...t,
+    resolution: getVideoResolutionLabel(t),
+  }))
 }
 
 function getInitialResolution(resolutions: DisplayTranscode[]): DisplayTranscode | null {
@@ -216,7 +207,18 @@ export const CompareVideoPane = forwardRef<ComparePaneHandle, CompareVideoPanePr
           hls.on(Hls.Events.LEVEL_SWITCHED, (_event, eventData) => {
             const level = hls?.levels[eventData.level]
             if (level) {
-              setActiveAutoResolution(`${level.height}p`)
+              const matched = resolutions.find(
+                (r) => r.width === level.width && r.height === level.height,
+              )
+              if (matched?.resolution) {
+                setActiveAutoResolution(matched.resolution)
+              } else {
+                const shortSide =
+                  level.width && level.height
+                    ? Math.min(level.width, level.height)
+                    : level.height || level.width
+                setActiveAutoResolution(shortSide ? `${shortSide}p` : undefined)
+              }
             }
           })
 
@@ -617,7 +619,7 @@ export const CompareVideoPane = forwardRef<ComparePaneHandle, CompareVideoPanePr
       ],
     )
 
-    const displayAnnotations = [...annotations, ...(isActive ? draftAnnotations : [])]
+    const displayAnnotations = [...(annotations ?? []), ...(isActive ? draftAnnotations : [])]
 
     const scale = zoom
     const defaultPanX = (containerSize.width - vidW * scale) / 2

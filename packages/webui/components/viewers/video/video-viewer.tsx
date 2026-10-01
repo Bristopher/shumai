@@ -10,6 +10,7 @@ import { MobileVideoControlBar } from './mobile-video-control-bar'
 import { useIsMobile } from '@/ui/hooks/use-mobile'
 import DrawingCanvas from '@/ui/components/drawing-canvas'
 import { useAnnotationStore } from '@/ui/stores/annotation-store'
+import { getVideoResolutionLabel } from '@/ui/lib/media'
 import { FileViewerProps, MediaController } from '../types'
 import { centeredPan, fitScale, zoomAtPoint } from '../pan-zoom'
 import { usePanZoomGestures } from '../use-pan-zoom'
@@ -39,24 +40,10 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
       ? (data.media?.hls?.resolutions ?? [])
       : (data.media?.videoTranscodes ?? [])
 
-    const resolutions: DisplayTranscode[] = baseTranscodes.map((t) => {
-      const longSide = Math.max(t.width, t.height)
-      const resCandidate = 'resolution' in t && t.resolution ? t.resolution : undefined
-      let resolution = resCandidate || `${t.height}p`
-      if (!resCandidate) {
-        if (longSide >= 3840) resolution = '2160p'
-        else if (longSide >= 1920) resolution = '1080p'
-        else if (longSide >= 1280) resolution = '720p'
-        else if (longSide >= 960) resolution = '540p'
-        else if (longSide >= 640) resolution = '360p'
-        else if (longSide >= 320) resolution = '180p'
-      }
-
-      return {
-        ...t,
-        resolution,
-      }
-    })
+    const resolutions: DisplayTranscode[] = baseTranscodes.map((t) => ({
+      ...t,
+      resolution: getVideoResolutionLabel(t),
+    }))
     // Only transcoded proxy versions are ever displayed; the raw original file
     // is never used as a playback source.
     const hasMedia = (isHls || resolutions.length > 0) && !!data.media?.metadata
@@ -365,8 +352,18 @@ const VideoViewer = React.forwardRef<MediaController, FileViewerProps>(
           hls.on(Hls.Events.LEVEL_SWITCHED, (_event, eventData) => {
             const level = hls?.levels[eventData.level]
             if (level) {
-              const h = level.height || Math.min(level.width, level.height)
-              setActiveAutoResolution(h ? `${h}p` : undefined)
+              const matched = resolutions.find(
+                (r) => r.width === level.width && r.height === level.height,
+              )
+              if (matched?.resolution) {
+                setActiveAutoResolution(matched.resolution)
+              } else {
+                const shortSide =
+                  level.width && level.height
+                    ? Math.min(level.width, level.height)
+                    : level.height || level.width
+                setActiveAutoResolution(shortSide ? `${shortSide}p` : undefined)
+              }
             }
           })
 
