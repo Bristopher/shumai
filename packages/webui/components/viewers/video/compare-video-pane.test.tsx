@@ -305,4 +305,198 @@ describe('CompareVideoPane', () => {
     const lastState = reportedStates[reportedStates.length - 1]
     expect(lastState?.video?.resolutions?.[0]?.resolution).toBe('1080p')
   })
+
+  it('sets poster on video element from file.preview.thumbnailUrl', () => {
+    const videoWithThumb: AssetInfo = {
+      id: 'compare-thumb',
+      name: 'thumb.mp4',
+      proxyType: 'video',
+      preview: {
+        thumbnailUrl: 'https://cdn.example.com/compare-poster.jpg',
+      },
+      media: {
+        metadata: {
+          originalWidth: 1920,
+          originalHeight: 1080,
+          duration: 10,
+          frameRate: 30,
+          totalFrames: 300,
+        },
+        videoTranscodes: [
+          {
+            resolution: '1080p',
+            url: 'https://cdn.example.com/compare-1080p.mp4',
+            width: 1920,
+            height: 1080,
+          },
+        ],
+      },
+    } as unknown as AssetInfo
+
+    const { container } = render(
+      <CompareVideoPane
+        file={videoWithThumb}
+        isActive={true}
+        annotations={[]}
+        onActivate={vi.fn()}
+        onStateChange={vi.fn()}
+      />,
+    )
+    const video = container.querySelector(
+      '[data-testid="compare-video-area"] video',
+    ) as HTMLVideoElement
+    expect(video.getAttribute('poster')).toBe('https://cdn.example.com/compare-poster.jpg')
+  })
+
+  it('shows loading spinner initially, transitions on loadeddata, and blocks play while loading', () => {
+    const testVideo: AssetInfo = {
+      id: 'compare-loading-test',
+      name: 'loading.mp4',
+      proxyType: 'video',
+      media: {
+        metadata: {
+          originalWidth: 1920,
+          originalHeight: 1080,
+          duration: 10,
+          frameRate: 30,
+          totalFrames: 300,
+        },
+        videoTranscodes: [
+          {
+            resolution: '1080p',
+            url: 'https://cdn.example.com/compare-1080p.mp4',
+            width: 1920,
+            height: 1080,
+          },
+        ],
+      },
+    } as unknown as AssetInfo
+
+    const onRequestTogglePlay = vi.fn()
+    const { container } = render(
+      <CompareVideoPane
+        file={testVideo}
+        isActive={true}
+        annotations={[]}
+        onActivate={vi.fn()}
+        onStateChange={vi.fn()}
+        onRequestTogglePlay={onRequestTogglePlay}
+      />,
+    )
+
+    const area = container.querySelector('[data-testid="compare-video-area"]') as HTMLDivElement
+    const video = area.querySelector('video') as HTMLVideoElement
+
+    // Initially loading spinner is visible
+    expect(container.querySelector('[data-testid="compare-video-loading-spinner"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="compare-video-play-overlay"]')).toBeNull()
+
+    // Clicking while loading should not trigger play
+    act(() => {
+      area.click()
+    })
+    expect(onRequestTogglePlay).not.toHaveBeenCalled()
+
+    // Dispatch loadeddata
+    act(() => {
+      video.dispatchEvent(new Event('loadeddata'))
+    })
+
+    // Spinner gone, play overlay visible
+    expect(container.querySelector('[data-testid="compare-video-loading-spinner"]')).toBeNull()
+    expect(container.querySelector('[data-testid="compare-video-play-overlay"]')).not.toBeNull()
+
+    // Clicking now triggers toggle play
+    act(() => {
+      area.click()
+    })
+    expect(onRequestTogglePlay).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not cancel waiting stall debounce when progress events fire during stall', () => {
+    vi.useFakeTimers()
+    try {
+      const testVideo: AssetInfo = {
+        id: 'compare-stall-progress-test',
+        name: 'compare-stall-progress.mp4',
+        proxyType: 'video',
+        media: {
+          metadata: {
+            originalWidth: 1920,
+            originalHeight: 1080,
+            duration: 10,
+            frameRate: 30,
+            totalFrames: 300,
+          },
+          videoTranscodes: [
+            {
+              resolution: '1080p',
+              url: 'https://cdn.example.com/compare-1080p.mp4',
+              width: 1920,
+              height: 1080,
+            },
+          ],
+        },
+      } as unknown as AssetInfo
+
+      const { container } = render(
+        <CompareVideoPane
+          file={testVideo}
+          isActive={true}
+          annotations={[]}
+          onActivate={vi.fn()}
+          onStateChange={vi.fn()}
+        />,
+      )
+
+      const video = container.querySelector(
+        '[data-testid="compare-video-area"] video',
+      ) as HTMLVideoElement
+
+      // 1. Initial ready state
+      act(() => {
+        video.dispatchEvent(new Event('loadeddata'))
+      })
+      expect(container.querySelector('[data-testid="compare-video-loading-spinner"]')).toBeNull()
+
+      // 2. Play starts (paused === false)
+      Object.defineProperty(video, 'paused', { value: false, configurable: true, writable: true })
+      act(() => {
+        video.dispatchEvent(new Event('playing'))
+      })
+
+      // 3. Stalls: dispatches waiting
+      act(() => {
+        video.dispatchEvent(new Event('waiting'))
+      })
+      // Spinner not visible immediately (within 200ms debounce)
+      expect(container.querySelector('[data-testid="compare-video-loading-spinner"]')).toBeNull()
+
+      // 4. Progress event fires at 100ms while paused is false (data still trickling in)
+      act(() => {
+        vi.advanceTimersByTime(100)
+        video.dispatchEvent(new Event('progress'))
+      })
+      // Should NOT clear debounce or mark loading false
+      expect(container.querySelector('[data-testid="compare-video-loading-spinner"]')).toBeNull()
+
+      // 5. Advance past 200ms debounce (advance remaining 110ms)
+      act(() => {
+        vi.advanceTimersByTime(110)
+      })
+      // Spinner should now appear despite the progress event!
+      expect(
+        container.querySelector('[data-testid="compare-video-loading-spinner"]'),
+      ).not.toBeNull()
+
+      // 6. Playback resumes: dispatch playing
+      act(() => {
+        video.dispatchEvent(new Event('playing'))
+      })
+      // Spinner disappears
+      expect(container.querySelector('[data-testid="compare-video-loading-spinner"]')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
