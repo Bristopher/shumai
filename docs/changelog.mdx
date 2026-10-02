@@ -3,6 +3,31 @@ title: "Changelog"
 description: "Recent updates, new features, and improvements in Shumai"
 ---
 
+<Update label="v0.5.0" description="October 2, 2026">
+
+### Added
+
+* **transcode**: Add configurable target resolution ladders (480p, 720p, 1080p, 1440p, 2160p) for MP4 Multi Resolutions transcoding in team settings, with unified resolution matching and lowest-resolution fallback for both MP4 and HLS
+* **transcode**: Add HLS live streaming with fMP4/CMAF adaptive bitrate ladders (480p, 720p, 1080p, 1440p, 2160p), configurable in Transcode Settings, with automatic quality switching, manual resolution selection in the video viewer, seamless rendition switching, and full watermarking support for shared links
+* **transcode**: Add basic camera RAW image support for popular camera formats (including Sony ARW, Canon CR2/CR3, Nikon NEF, Adobe DNG, Fujifilm RAF, and Panasonic RW2), extracting high-quality embedded JPEG previews and automatically applying camera orientation for fast thumbnail and proxy generation
+
+### Fixed
+
+- **asset**: Fix an issue where media files remained stuck in a perpetual "Preparing..." state when transcoding failed, by displaying a clear failed status and error details in the file list and file viewer
+
+* **transcode**: Fix an issue where videos or audio-only files containing attached cover art or picture streams could cause transcoding to fail during poster generation or select a single static image instead of the video
+
+* **webui**: Fix inconsistent video resolution labels across download menus, mobile file headers, and the video player by correctly deriving resolutions from the video's short side, including portrait videos and 480p videos
+
+* **trash**: Fix an issue where the "Empty Trash" confirmation dialog would close immediately instead of showing a loading state while files were being permanently deleted
+
+### Changed
+
+* **settings**: Redesign team Video Transcoding settings with dedicated cards for Transcode Policy, Hardware Acceleration, and FFmpeg Threads, clearly explaining MP4 and HLS playback vs download behavior and storage implications
+* **settings**: Rename AI Settings group to Team AI Settings in settings navigation
+
+</Update>
+
 <Update label="v0.4.9" description="September 28, 2026">
 
 ### Added
