@@ -382,4 +382,63 @@ describe('FileCard', () => {
     // The duration badge appears once processing is done.
     expect(screen.getByText('00:10')).toBeTruthy()
   })
+
+  it('renders failed state with alert icon and shows creator at bottom when status is failed without a preview', () => {
+    const failedItem: AssetInfo = {
+      ...fileItem,
+      status: 'failed',
+      creator: { id: 'u1', name: 'Alice' },
+    } as AssetInfo
+
+    renderComponent({ item: failedItem })
+
+    expect(screen.queryByTestId('file-card-preparing-circle')).toBeNull()
+    const failedState = screen.getByTestId('file-card-failed-state')
+    expect(failedState).toBeTruthy()
+    expect(screen.getByText(/Processing failed|处理失败/i)).toBeTruthy()
+    expect(screen.getByText(/Alice/i)).toBeTruthy()
+  })
+
+  it('renders thumbnail with failed badge in top-right corner, shows error in tooltip on hover, and shows creator at bottom', () => {
+    vi.useFakeTimers()
+    const failedItemWithPreview: AssetInfo = {
+      ...fileItem,
+      status: 'failed',
+      creator: { id: 'u1', name: 'Alice' },
+      media: {
+        error: 'FFmpeg transcode failed: exit code 1',
+      },
+      preview: {
+        proxyType: 'video',
+        thumbnailUrl: 'https://example.com/poster.webp',
+        duration: 10,
+      },
+    } as AssetInfo
+
+    renderComponent({ item: failedItemWithPreview })
+
+    const media = screen.getByTestId('file-card-preview-media')
+    expect(media.className).not.toContain('animate-pulse')
+    const badge = screen.getByTestId('file-card-failed-badge')
+    expect(badge).toBeTruthy()
+    expect(badge.textContent).toMatch(/Transcoding Failed|转码失败/i)
+    expect(badge.querySelector('svg')).toBeNull()
+
+    // Failed badge is in the top-right container
+    const rightTopContainer = badge.closest('.absolute.right-2.top-2')
+    expect(rightTopContainer).toBeTruthy()
+
+    // Creator is still shown at the bottom of the card
+    expect(screen.getByText(/Alice/i)).toBeTruthy()
+
+    // Hovering the badge reveals the error message in tooltip
+    fireEvent.pointerMove(badge, { pointerType: 'mouse' })
+    act(() => {
+      vi.advanceTimersByTime(200)
+    })
+    const tooltip = screen.getByRole('tooltip')
+    expect(tooltip).toBeTruthy()
+    expect(tooltip.textContent).toContain('FFmpeg transcode failed: exit code 1')
+    vi.useRealTimers()
+  })
 })

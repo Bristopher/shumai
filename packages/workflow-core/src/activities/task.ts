@@ -82,9 +82,34 @@ export async function updateTaskStatusActivity(params: UpdateTaskStatusParams): 
 export interface UpdateAssetStatusParams {
   assetId: string
   status: AssetStatus
+  error?: string
 }
 
 export async function updateAssetStatusActivity(params: UpdateAssetStatusParams): Promise<void> {
+  if (params.status === AssetStatus.failed) {
+    const asset = await prisma.asset.findUnique({
+      where: { id: params.assetId },
+      select: { media: true, status: true },
+    })
+    // Never overwrite an asset that has already completed media processing
+    if (asset?.status === AssetStatus.processed) {
+      return
+    }
+    const data: Prisma.AssetUpdateInput = { status: params.status }
+    if (params.error !== undefined) {
+      const existingMedia = (asset?.media as PrismaJson.MediaInfo | null) || {}
+      data.media = {
+        ...existingMedia,
+        error: params.error.slice(0, 500),
+      } as PrismaJson.MediaInfo
+    }
+    await prisma.asset.updateMany({
+      where: { id: params.assetId, isDeleted: false, status: { not: AssetStatus.processed } },
+      data,
+    })
+    return
+  }
+
   await prisma.asset.updateMany({
     where: { id: params.assetId, isDeleted: false },
     data: { status: params.status },

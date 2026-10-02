@@ -48,6 +48,72 @@ describe('Task Activities', () => {
     expect(updated?.status).toBe(AssetStatus.processing)
   })
 
+  it('should update asset status to failed and store truncated error message in media', async () => {
+    const asset = await prisma.asset.create({
+      data: {
+        name: 'test-fail.mp4',
+        storageKey: { create: { key: 'test-fail.mp4' } },
+        status: AssetStatus.processing,
+        type: 'file',
+        media: {
+          original: null,
+          videoTranscodes: [],
+          imageTranscodes: [],
+          duration: 10,
+          filesize: 1000,
+          frames: 300,
+          finishedAt: '',
+          metadata: null,
+        },
+      },
+    })
+
+    const longError = 'x'.repeat(600)
+    await updateAssetStatusActivity({
+      assetId: asset.id,
+      status: AssetStatus.failed,
+      error: longError,
+    })
+
+    const updated = await prisma.asset.findUnique({ where: { id: asset.id } })
+    expect(updated?.status).toBe(AssetStatus.failed)
+    const media = updated?.media as PrismaJson.MediaInfo
+    expect(media?.error).toBe('x'.repeat(500))
+    expect(media?.duration).toBe(10)
+  })
+
+  it('should NOT overwrite processed status or inject error when asset is already processed', async () => {
+    const asset = await prisma.asset.create({
+      data: {
+        name: 'already-processed.mp4',
+        storageKey: { create: { key: 'already-processed.mp4' } },
+        status: AssetStatus.processed,
+        type: 'file',
+        media: {
+          original: null,
+          videoTranscodes: [],
+          imageTranscodes: [],
+          duration: 10,
+          filesize: 1000,
+          frames: 300,
+          finishedAt: '2026-01-01T00:00:00Z',
+          metadata: null,
+        },
+      },
+    })
+
+    await updateAssetStatusActivity({
+      assetId: asset.id,
+      status: AssetStatus.failed,
+      error: 'Some post-transcode error',
+    })
+
+    const updated = await prisma.asset.findUnique({ where: { id: asset.id } })
+    expect(updated?.status).toBe(AssetStatus.processed)
+    const media = updated?.media as PrismaJson.MediaInfo
+    expect(media?.error).toBeUndefined()
+  })
+
   it('should NOT overwrite trashed status when asset is soft-deleted (isDeleted: true)', async () => {
     const asset = await prisma.asset.create({
       data: {
