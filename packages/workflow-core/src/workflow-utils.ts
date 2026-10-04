@@ -70,7 +70,7 @@ export function getActivities<T = any>(): T {
     // Temporal's proxyActivities requires a type parameter, so we use any for generic activities.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     baseProxy = wf.proxyActivities<any>({
-      startToCloseTimeout: '10 minutes',
+      startToCloseTimeout: '120 minutes',
       retry: {
         maximumAttempts: 5,
         initialInterval: '10s',
@@ -165,7 +165,7 @@ export async function executeActivity(
     if (isTemporal()) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const handle = wf.proxyActivities<any>({
-        startToCloseTimeout: '10 minutes',
+        startToCloseTimeout: '120 minutes',
         taskQueue: queue,
         retry: {
           maximumAttempts: 5,
