@@ -167,6 +167,7 @@ export async function transcodeVideoWorkflow(task: WorkflowTask): Promise<void> 
             sourceColorTransfer: metadata.colorTransfer,
             sourceColorPrimaries: metadata.colorPrimaries,
             sourceColorSpace: metadata.colorSpace,
+            sourceRotation: metadata.rotation ?? 0,
             streamIndex: metadata.videoStreamIndex,
             audioStreamIndex: metadata.audioStreamIndex,
           })
@@ -197,6 +198,8 @@ export async function transcodeVideoWorkflow(task: WorkflowTask): Promise<void> 
           sourceColorTransfer: metadata.colorTransfer,
           sourceColorPrimaries: metadata.colorPrimaries,
           sourceColorSpace: metadata.colorSpace,
+          // rotation is undefined when the probed source has none
+          sourceRotation: metadata.rotation ?? 0,
           streamIndex: metadata.videoStreamIndex,
           audioStreamIndex: metadata.audioStreamIndex,
         })
@@ -227,6 +230,7 @@ export async function transcodeVideoWorkflow(task: WorkflowTask): Promise<void> 
             sourceColorTransfer: metadata.colorTransfer,
             sourceColorPrimaries: metadata.colorPrimaries,
             sourceColorSpace: metadata.colorSpace,
+            sourceRotation: metadata.rotation ?? 0,
             streamIndex: metadata.videoStreamIndex,
             audioStreamIndex: metadata.audioStreamIndex,
           })

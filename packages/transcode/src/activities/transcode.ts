@@ -334,6 +334,7 @@ export interface VideoActivityParams {
   sourceColorTransfer?: string
   sourceColorPrimaries?: string
   sourceColorSpace?: string
+  sourceRotation?: number
   streamIndex?: number
   audioStreamIndex?: number
 }
@@ -397,6 +398,7 @@ export async function transcodeVideoActivity(
       sourceColorTransfer: params.sourceColorTransfer,
       sourceColorPrimaries: params.sourceColorPrimaries,
       sourceColorSpace: params.sourceColorSpace,
+      sourceRotation: params.sourceRotation,
       streamIndex: params.streamIndex,
       audioStreamIndex: params.audioStreamIndex,
     })
@@ -464,6 +466,7 @@ export interface HlsActivityParams {
   sourceColorTransfer?: string
   sourceColorPrimaries?: string
   sourceColorSpace?: string
+  sourceRotation?: number
   streamIndex?: number
   audioStreamIndex?: number
 }
@@ -532,6 +535,7 @@ export async function transcodeHlsActivity(params: HlsActivityParams): Promise<P
         sourceColorTransfer: params.sourceColorTransfer,
         sourceColorPrimaries: params.sourceColorPrimaries,
         sourceColorSpace: params.sourceColorSpace,
+        sourceRotation: params.sourceRotation,
         streamIndex: params.streamIndex,
         audioStreamIndex: params.audioStreamIndex,
       })

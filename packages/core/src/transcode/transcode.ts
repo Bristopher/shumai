@@ -194,6 +194,8 @@ export interface TranscodeVideoParams {
   sourceColorTransfer?: string
   sourceColorPrimaries?: string
   sourceColorSpace?: string
+  /** Source rotation in degrees from MediaMetadata; probed when omitted. */
+  sourceRotation?: number
   streamIndex?: number
   audioStreamIndex?: number
 }
@@ -218,6 +220,8 @@ export interface TranscodeHlsRenditionParams {
   sourceColorPrimaries?: string
   sourceColorSpace?: string
   segmentDuration?: number
+  /** Source rotation in degrees from MediaMetadata; probed when omitted. */
+  sourceRotation?: number
   streamIndex?: number
   audioStreamIndex?: number
 }
@@ -251,6 +255,35 @@ export const H264_ENCODER_CONFIGS: Record<string, EncoderConfig> = {
   libx264: {
     name: 'libx264',
     presetArgs: ['-preset', 'fast', '-crf', '23', '-bf', '0'],
+  },
+}
+
+/**
+ * How an encoder can also decode and scale on its own device, so frames stay in
+ * GPU memory instead of being decoded and scaled on the CPU and uploaded.
+ * Only backends verified on real hardware are listed; others (e.g. h264_nvenc
+ * with `-hwaccel cuda` + `scale_cuda`, h264_qsv, RKMPP) can be added the same way.
+ */
+export interface HardwareDecodeConfig {
+  /** Input options placed before `-i` (after any `-init_hw_device`). */
+  inputArgs: string[]
+  /** Output options placed after the filter graph. */
+  outputArgs: string[]
+  /** GPU filter fitting the frame within width x height with even dimensions. */
+  scaleFilter: (width: number, height: number) => string
+}
+
+export const HW_DECODE_CONFIGS: Partial<Record<string, HardwareDecodeConfig>> = {
+  h264_vaapi: {
+    inputArgs: ['-hwaccel', 'vaapi', '-hwaccel_device', 'accel', '-hwaccel_output_format', 'vaapi'],
+    // If the decoder reinitializes mid-stream with a different coded size
+    // (e.g. 1080 -> 1088), ffmpeg would otherwise auto-insert a software
+    // scaler, which cannot take GPU frames, and fail.
+    outputArgs: ['-noautoscale'],
+    // Output range is left as-is (matching the software path): on i965,
+    // out_range only retags the stream without converting levels.
+    scaleFilter: (width, height) =>
+      `scale_vaapi=w=${width}:h=${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:format=nv12:mode=hq`,
   },
 }
 
@@ -291,6 +324,43 @@ export function getVaapiDevice(driDir = '/dev/dri'): string | null {
   }
 
   return null
+}
+
+/**
+ * Whether hardware encoders with a {@link HW_DECODE_CONFIGS} entry also decode
+ * and scale on the GPU. Enabled by default; set SHUMAI_HW_DECODE=false to disable.
+ */
+export function isHwDecodeEnabled(): boolean {
+  const value = process.env.SHUMAI_HW_DECODE?.trim().toLowerCase()
+  return value !== 'false' && value !== '0' && value !== 'off'
+}
+
+/**
+ * A GPU-decode attempt whose output stops growing for this long is killed and
+ * retried with software decode, since some driver failures hang ffmpeg instead
+ * of exiting. Override with SHUMAI_HW_DECODE_STALL_TIMEOUT (seconds).
+ */
+export function getHwDecodeStallTimeoutMs(): number {
+  const seconds = parseFloat(process.env.SHUMAI_HW_DECODE_STALL_TIMEOUT ?? '')
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 120_000
+}
+
+function getPathSize(target: string): number {
+  try {
+    const stat = fs.statSync(target)
+    if (!stat.isDirectory()) {
+      return stat.size
+    }
+    return fs
+      .readdirSync(target)
+      .reduce((total, entry) => total + getPathSize(path.join(target, entry)), 0)
+  } catch {
+    return 0
+  }
+}
+
+function normalizeRotation(rotation: number): number {
+  return ((Math.round(rotation) % 360) + 360) % 360
 }
 
 export function parseBitrateKbps(bitrate: string | number): number {
@@ -1009,6 +1079,31 @@ export class TranscodeService {
   async transcodeVideo(params: TranscodeVideoParams): Promise<void> {
     const encoder = await this.selectH264Encoder(params.hardwareAcceleration)
 
+    if (await this.canUseHwDecode(params, encoder)) {
+      try {
+        await this.executeFfmpegVideoTranscode(params, encoder, { hwDecode: true })
+        return
+      } catch (err) {
+        if (this.isAbortError(err, params.signal)) {
+          throw err
+        }
+
+        logger.warn(
+          {
+            err,
+            encoder: encoder.name,
+            inputFile: params.inputFile,
+            outputFile: params.outputFile,
+            width: params.width,
+            height: params.height,
+          },
+          'Hardware decode failed; retrying with software decode and hardware encode',
+        )
+
+        this.removeFileIfExists(params.outputFile)
+      }
+    }
+
     if (encoder.name !== 'libx264') {
       try {
         await this.executeFfmpegVideoTranscode(params, encoder)
@@ -1030,13 +1125,7 @@ export class TranscodeService {
           'Hardware video transcoding failed; falling back to software transcode (libx264)',
         )
 
-        if (fs.existsSync(params.outputFile)) {
-          try {
-            fs.unlinkSync(params.outputFile)
-          } catch {
-            // ignore unlink errors
-          }
-        }
+        this.removeFileIfExists(params.outputFile)
 
         await this.executeFfmpegVideoTranscode(params, H264_ENCODER_CONFIGS.libx264)
         return
@@ -1046,9 +1135,211 @@ export class TranscodeService {
     await this.executeFfmpegVideoTranscode(params, encoder)
   }
 
+  /**
+   * GPU decode + scale is attempted only for plain proxies: watermark overlays,
+   * HDR sources and rotated sources keep the software decode path. (ffmpeg
+   * cannot auto-insert its rotation filter on GPU frames, so a rotated phone
+   * clip would otherwise come out sideways rather than fail.) Sources the GPU
+   * cannot decode (e.g. HEVC/10-bit on older Intel iGPUs) fail fast and are
+   * retried with software decode by the caller.
+   */
+  private async canUseHwDecode(
+    params: Pick<
+      TranscodeVideoParams,
+      | 'inputFile'
+      | 'streamIndex'
+      | 'overlayFile'
+      | 'sourceIsHdr'
+      | 'sourceHdrType'
+      | 'sourceRotation'
+    >,
+    encoder: EncoderConfig,
+  ): Promise<boolean> {
+    if (!HW_DECODE_CONFIGS[encoder.name] || !isHwDecodeEnabled()) {
+      return false
+    }
+    if (params.overlayFile) {
+      return false
+    }
+    const isSourceHdr =
+      params.sourceIsHdr ||
+      params.sourceHdrType === 'pq' ||
+      params.sourceHdrType === 'hlg' ||
+      params.sourceHdrType === 'dovi_p5'
+    if (isSourceHdr) {
+      return false
+    }
+    const rotation =
+      params.sourceRotation !== undefined
+        ? normalizeRotation(params.sourceRotation)
+        : await this.getVideoRotation(params.inputFile, params.streamIndex)
+    return rotation === 0
+  }
+
+  /**
+   * Rotation of the source video stream in degrees (0, 90, 180 or 270), from
+   * the display matrix or the legacy `rotate` tag. Returns null if it cannot be
+   * determined.
+   */
+  async getVideoRotation(inputFile: string, streamIndex?: number): Promise<number | null> {
+    try {
+      const { stdout } = await execFileAsync('ffprobe', [
+        '-v',
+        'error',
+        '-select_streams',
+        streamIndex !== undefined ? String(streamIndex) : 'V:0',
+        '-show_entries',
+        'stream_side_data=rotation:stream_tags=rotate',
+        '-of',
+        'json',
+        inputFile,
+      ])
+      const stream = JSON.parse(stdout)?.streams?.[0]
+      if (!stream) {
+        return null
+      }
+      let rotation = 0
+      const sideData = Array.isArray(stream.side_data_list) ? stream.side_data_list : []
+      const matrix = sideData.find((d: { rotation?: unknown }) => typeof d.rotation === 'number')
+      if (matrix) {
+        rotation = matrix.rotation
+      } else if (stream.tags?.rotate !== undefined) {
+        rotation = parseFloat(stream.tags.rotate) || 0
+      }
+      return normalizeRotation(rotation)
+    } catch (err) {
+      logger.debug({ err, inputFile }, 'Failed to probe video rotation')
+      return null
+    }
+  }
+
+  private removeFileIfExists(filePath: string): void {
+    if (fs.existsSync(filePath)) {
+      try {
+        fs.unlinkSync(filePath)
+      } catch {
+        // ignore unlink errors
+      }
+    }
+  }
+
+  /**
+   * Inputs, video filter graph and `-map [vout]`, shared by the MP4 and HLS
+   * paths: GPU decode + GPU scale when `hwDecodeConfig` is set, otherwise
+   * software decode + scale (+ upload for VAAPI encode).
+   */
+  private buildVideoInputArgs(
+    params: Pick<
+      TranscodeVideoParams,
+      'inputFile' | 'overlayFile' | 'streamIndex' | 'width' | 'height'
+    >,
+    options: {
+      isVaapi: boolean
+      vaapiDevice?: string
+      hwDecodeConfig?: HardwareDecodeConfig
+      frameRate?: number | string
+    },
+  ): string[] {
+    const { isVaapi, vaapiDevice, hwDecodeConfig, frameRate } = options
+    const args: string[] = []
+
+    if (isVaapi && vaapiDevice) {
+      args.push('-init_hw_device', `vaapi=accel:${vaapiDevice}`, '-filter_hw_device', 'accel')
+    }
+    if (hwDecodeConfig) {
+      args.push(...hwDecodeConfig.inputArgs)
+    }
+
+    args.push('-i', params.inputFile)
+    const baseScale = hwDecodeConfig
+      ? hwDecodeConfig.scaleFilter(params.width, params.height)
+      : `scale=w=${params.width}:h=${params.height}:force_original_aspect_ratio=decrease,scale=w='trunc(iw/2)*2':h='trunc(ih/2)*2'`
+
+    const vPad = params.streamIndex !== undefined ? `0:${params.streamIndex}` : '0:V'
+
+    let filterComplex: string
+    if (params.overlayFile) {
+      args.push('-i', params.overlayFile)
+      filterComplex = `[${vPad}]scale=${params.width}:${params.height}[vscaled];[vscaled][1:v]overlay=0:0`
+    } else {
+      filterComplex = `[${vPad}]${baseScale}`
+    }
+
+    if (frameRate) {
+      filterComplex += `,fps=${frameRate}`
+    }
+    if (isVaapi && !hwDecodeConfig) {
+      filterComplex += ',format=nv12,hwupload=extra_hw_frames=64'
+    }
+    filterComplex += '[vout]'
+
+    args.push('-filter_complex', filterComplex, '-map', '[vout]')
+    if (hwDecodeConfig) {
+      args.push(...hwDecodeConfig.outputArgs)
+    }
+    return args
+  }
+
+  /**
+   * Runs ffmpeg. With `stallWatchPath`, ffmpeg is killed (SIGKILL; hung VAAPI
+   * processes have been seen to ignore SIGTERM) if that output file/directory
+   * stops growing for {@link getHwDecodeStallTimeoutMs}, and the call rejects
+   * with a regular error so the caller can fall back.
+   */
+  private async runFfmpeg(
+    args: string[],
+    options: { signal?: AbortSignal; stallWatchPath?: string } = {},
+  ): Promise<void> {
+    const ffmpegArgs = ['-y', '-loglevel', 'warning', ...args]
+
+    if (!options.stallWatchPath) {
+      if (options.signal) {
+        await execFileAsync('ffmpeg', ffmpegArgs, { signal: options.signal })
+      } else {
+        await execFileAsync('ffmpeg', ffmpegArgs)
+      }
+      return
+    }
+
+    const stallTimeoutMs = getHwDecodeStallTimeoutMs()
+    const stall = new AbortController()
+    const signal = options.signal ? AbortSignal.any([options.signal, stall.signal]) : stall.signal
+    const watchPath = options.stallWatchPath
+    let lastSize = -1
+    let lastProgressAt = Date.now()
+    const timer = setInterval(
+      () => {
+        const size = getPathSize(watchPath)
+        if (size !== lastSize) {
+          lastSize = size
+          lastProgressAt = Date.now()
+        } else if (Date.now() - lastProgressAt >= stallTimeoutMs) {
+          stall.abort()
+        }
+      },
+      Math.min(5000, stallTimeoutMs),
+    )
+    timer.unref?.()
+
+    try {
+      await execFileAsync('ffmpeg', ffmpegArgs, { signal, killSignal: 'SIGKILL' })
+    } catch (err) {
+      if (stall.signal.aborted && !options.signal?.aborted) {
+        throw new Error(
+          `ffmpeg made no progress for ${Math.round(stallTimeoutMs / 1000)}s and was killed`,
+          { cause: err },
+        )
+      }
+      throw err
+    } finally {
+      clearInterval(timer)
+    }
+  }
+
   private async executeFfmpegVideoTranscode(
     params: TranscodeVideoParams,
     encoder: EncoderConfig,
+    options: { hwDecode?: boolean } = {},
   ): Promise<void> {
     const isSourceHdr =
       params.sourceIsHdr ||
@@ -1059,6 +1350,11 @@ export class TranscodeService {
 
     const isVaapi = encoder.name === 'h264_vaapi'
     const vaapiDevice = isVaapi ? (this.getVaapiDevice() ?? '/dev/dri/renderD128') : undefined
+    const hwDecodeConfig =
+      options.hwDecode && !params.overlayFile && (!isVaapi || vaapiDevice)
+        ? HW_DECODE_CONFIGS[encoder.name]
+        : undefined
+    const hwDecode = Boolean(hwDecodeConfig)
 
     logger.info(
       {
@@ -1067,38 +1363,17 @@ export class TranscodeService {
         inputFile: params.inputFile,
         outputFile: params.outputFile,
         vaapiDevice,
+        hwDecode,
       },
       'Starting video transcoding',
     )
 
-    let filterComplex: string
-    const args: string[] = []
-
-    if (isVaapi && vaapiDevice) {
-      args.push('-init_hw_device', `vaapi=accel:${vaapiDevice}`, '-filter_hw_device', 'accel')
-    }
-
-    args.push('-i', params.inputFile)
-    const baseScale = `scale=w=${params.width}:h=${params.height}:force_original_aspect_ratio=decrease,scale=w='trunc(iw/2)*2':h='trunc(ih/2)*2'`
-
-    const vPad = params.streamIndex !== undefined ? `0:${params.streamIndex}` : '0:V'
-
-    if (params.overlayFile) {
-      args.push('-i', params.overlayFile)
-      filterComplex = `[${vPad}]scale=${params.width}:${params.height}[vscaled];[vscaled][1:v]overlay=0:0`
-    } else {
-      filterComplex = `[${vPad}]${baseScale}`
-    }
-
-    if (params.frameRate) {
-      filterComplex += `,fps=${params.frameRate}`
-    }
-    if (isVaapi) {
-      filterComplex += ',format=nv12,hwupload=extra_hw_frames=64'
-    }
-    filterComplex += '[vout]'
-
-    args.push('-filter_complex', filterComplex, '-map', '[vout]')
+    const args = this.buildVideoInputArgs(params, {
+      isVaapi,
+      vaapiDevice,
+      hwDecodeConfig,
+      frameRate: params.frameRate,
+    })
 
     if (params.frameRate) {
       let calculatedFps: number
@@ -1210,17 +1485,39 @@ export class TranscodeService {
 
     args.push('-movflags', '+faststart', '-max_muxing_queue_size', '1024', params.outputFile)
 
-    if (params.signal) {
-      await execFileAsync('ffmpeg', ['-y', '-loglevel', 'warning', ...args], {
-        signal: params.signal,
-      })
-    } else {
-      await execFileAsync('ffmpeg', ['-y', '-loglevel', 'warning', ...args])
-    }
+    await this.runFfmpeg(args, {
+      signal: params.signal,
+      stallWatchPath: hwDecode ? params.outputFile : undefined,
+    })
   }
 
   async transcodeHlsRendition(params: TranscodeHlsRenditionParams): Promise<void> {
     const encoder = await this.selectH264Encoder(params.hardwareAcceleration)
+
+    if (await this.canUseHwDecode(params, encoder)) {
+      try {
+        await this.executeFfmpegHlsTranscode(params, encoder, { hwDecode: true })
+        return
+      } catch (err) {
+        if (this.isAbortError(err, params.signal)) {
+          throw err
+        }
+
+        logger.warn(
+          {
+            err,
+            encoder: encoder.name,
+            inputFile: params.inputFile,
+            outputDir: params.outputDir,
+            width: params.width,
+            height: params.height,
+          },
+          'Hardware decode failed for HLS; retrying with software decode and hardware encode',
+        )
+
+        this.removeDirIfExists(params.outputDir)
+      }
+    }
 
     if (encoder.name !== 'libx264') {
       try {
@@ -1243,13 +1540,7 @@ export class TranscodeService {
           'Hardware HLS transcoding failed; falling back to software transcode (libx264)',
         )
 
-        if (fs.existsSync(params.outputDir)) {
-          try {
-            fs.rmSync(params.outputDir, { recursive: true, force: true })
-          } catch {
-            // ignore unlink errors
-          }
-        }
+        this.removeDirIfExists(params.outputDir)
 
         await this.executeFfmpegHlsTranscode(params, H264_ENCODER_CONFIGS.libx264)
         return
@@ -1259,9 +1550,20 @@ export class TranscodeService {
     await this.executeFfmpegHlsTranscode(params, encoder)
   }
 
+  private removeDirIfExists(dirPath: string): void {
+    if (fs.existsSync(dirPath)) {
+      try {
+        fs.rmSync(dirPath, { recursive: true, force: true })
+      } catch {
+        // ignore unlink errors
+      }
+    }
+  }
+
   private async executeFfmpegHlsTranscode(
     params: TranscodeHlsRenditionParams,
     encoder: EncoderConfig,
+    options: { hwDecode?: boolean } = {},
   ): Promise<void> {
     fs.mkdirSync(params.outputDir, { recursive: true })
 
@@ -1274,6 +1576,11 @@ export class TranscodeService {
 
     const isVaapi = encoder.name === 'h264_vaapi'
     const vaapiDevice = isVaapi ? (this.getVaapiDevice() ?? '/dev/dri/renderD128') : undefined
+    const hwDecodeConfig =
+      options.hwDecode && !params.overlayFile && (!isVaapi || vaapiDevice)
+        ? HW_DECODE_CONFIGS[encoder.name]
+        : undefined
+    const hwDecode = Boolean(hwDecodeConfig)
 
     const segmentDuration = params.segmentDuration || 4
     let calculatedFps = 30
@@ -1304,37 +1611,17 @@ export class TranscodeService {
         height: params.height,
         segmentDuration,
         gopSize,
+        hwDecode,
       },
       'Starting HLS rendition transcoding',
     )
 
-    let filterComplex: string
-    const args: string[] = []
-
-    if (isVaapi && vaapiDevice) {
-      args.push('-init_hw_device', `vaapi=accel:${vaapiDevice}`, '-filter_hw_device', 'accel')
-    }
-
-    args.push('-i', params.inputFile)
-    const baseScale = `scale=w=${params.width}:h=${params.height}:force_original_aspect_ratio=decrease,scale=w='trunc(iw/2)*2':h='trunc(ih/2)*2'`
-
-    const vPad = params.streamIndex !== undefined ? `0:${params.streamIndex}` : '0:V'
-
-    if (params.overlayFile) {
-      args.push('-i', params.overlayFile)
-      filterComplex = `[${vPad}]scale=${params.width}:${params.height}[vscaled];[vscaled][1:v]overlay=0:0`
-    } else {
-      filterComplex = `[${vPad}]${baseScale}`
-    }
-
-    filterComplex += `,fps=${calculatedFps}`
-
-    if (isVaapi) {
-      filterComplex += ',format=nv12,hwupload=extra_hw_frames=64'
-    }
-    filterComplex += '[vout]'
-
-    args.push('-filter_complex', filterComplex, '-map', '[vout]')
+    const args = this.buildVideoInputArgs(params, {
+      isVaapi,
+      vaapiDevice,
+      hwDecodeConfig,
+      frameRate: calculatedFps,
+    })
 
     if (!params.disableAudio) {
       const aMap = params.audioStreamIndex !== undefined ? `0:${params.audioStreamIndex}` : '0:a:0?'
@@ -1508,13 +1795,10 @@ export class TranscodeService {
       playlistFile,
     )
 
-    if (params.signal) {
-      await execFileAsync('ffmpeg', ['-y', '-loglevel', 'warning', ...args], {
-        signal: params.signal,
-      })
-    } else {
-      await execFileAsync('ffmpeg', ['-y', '-loglevel', 'warning', ...args])
-    }
+    await this.runFfmpeg(args, {
+      signal: params.signal,
+      stallWatchPath: hwDecode ? params.outputDir : undefined,
+    })
   }
 
   async transcodeImage(
