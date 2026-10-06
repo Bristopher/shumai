@@ -24,6 +24,7 @@ jobs:
 
     steps:
       - name: Checkout repository
+        id: checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.pr && format('refs/pull/{0}/head', inputs.pr) || github.ref }}
@@ -57,8 +58,11 @@ jobs:
             crpi-000nkafzu6xvpwsc.cn-hongkong.personal.cr.aliyuncs.com/shumai-one/shumai
           tags: |
             type=semver,pattern={{version}}
-            type=ref,event=branch
+            type=ref,event=branch,enable=${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.pr && !inputs.tag) }}
+            type=raw,value=pr-${{ inputs.pr }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.pr != '' && inputs.tag == '' }}
             type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.checkout.outputs.commit }}
 
       # Build and push Docker image
       - name: Build and push Docker image
