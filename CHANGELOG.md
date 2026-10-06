@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+* **notification**: Notification cards are now clickable, taking you directly to the relevant file
 * **transcode**: Add hardware decoding and GPU scaling support for NVIDIA NVENC, Intel QuickSync Video (QSV), Rockchip (RKMPP), and VA-API (Intel and AMD GPUs), significantly speeding up video proxy and HLS rendition generation across supported platforms. Set `SHUMAI_HW_DECODE=false` to turn hardware decoding off
 * **transcode**: Add `dcraw_emu` fallback to generate WebP previews for camera RAW files without embedded JPEG previews
 
