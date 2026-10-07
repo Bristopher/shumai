@@ -22,10 +22,20 @@ import {
 } from './sql-query-builder'
 
 export class SearchService {
+  /**
+   * The asset service is resolved on use, not captured at construction. asset.ts reaches this module
+   * through a cycle (asset -> upload -> transcode -> photographer -> search), so `assetService` is
+   * not initialized yet when `searchService` is created below; a default parameter would freeze
+   * it as undefined. Tests inject their own through the second constructor argument.
+   */
   constructor(
     private readonly prismaClient: typeof prisma = prisma,
-    private readonly assetSvc: AssetService = assetService,
+    private readonly injectedAssetSvc?: AssetService,
   ) {}
+
+  private get assetSvc(): AssetService {
+    return this.injectedAssetSvc ?? assetService
+  }
 
   async search(folderId: string, req: SearchRequest): Promise<PaginatedData<AssetInfo[]>> {
     const targetFolderIds =
