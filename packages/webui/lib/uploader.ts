@@ -22,6 +22,17 @@ export interface ActiveUploadFile {
 
 export const activeUploads = new Map<string, ActiveUploadFile>()
 
+/** What Retry needs to upload a failed file again; the bytes never left this tab. */
+export interface RetryableUpload {
+  file: File
+  teamId: string
+  /** Folder the original upload targeted (the new task is created under it). */
+  parentId: string
+}
+
+/** Failed files that can be retried, by file id. Cleared when retried or dismissed. */
+export const retryableUploads = new Map<string, RetryableUpload>()
+
 // Setup beforeunload and pagehide listeners once
 if (typeof window !== 'undefined') {
   window.addEventListener('beforeunload', (e) => {
@@ -93,6 +104,8 @@ export interface StartUploadOptions {
   storageBackend: 's3' | 'local'
   createdAssets?: Array<{ tempId: string; assetId: string; key?: string }>
   presignedUrls?: PresignedUrl[]
+  /** Target folder; when set, a file that fails for good can be retried from the Uploads panel. */
+  parentId?: string
   onFileFinished?: (fileId: string) => void | Promise<void>
 }
 
@@ -103,6 +116,7 @@ export async function uploadFilesWithUppy({
   storageBackend,
   createdAssets = [],
   presignedUrls = [],
+  parentId,
   onFileFinished,
 }: StartUploadOptions): Promise<void> {
   if (!files.length) return
@@ -126,6 +140,7 @@ export async function uploadFilesWithUppy({
   }
 
   const fileIdByKey = new Map<string, string>()
+  const sourceFileById = new Map<string, File>()
 
   const uppy = new Uppy({
     autoProceed: true,
@@ -284,7 +299,10 @@ export async function uploadFilesWithUppy({
     const fileId = file.meta.fileId as string
     if (!activeUploads.has(fileId)) return
     activeUploads.delete(fileId)
-    failFile(taskId, fileId)
+    const source = sourceFileById.get(fileId)
+    const retryable = !!source && !!parentId
+    if (retryable) retryableUploads.set(fileId, { file: source, teamId, parentId })
+    failFile(taskId, fileId, { retryable })
     decrement()
 
     toast.error(`Failed to upload file: ${file.name}`)
@@ -352,6 +370,7 @@ export async function uploadFilesWithUppy({
       fileIdByKey.set(key, fileId)
     }
 
+    sourceFileById.set(fileId, item.file)
     activeUploads.set(fileId, {
       teamId,
       taskId,

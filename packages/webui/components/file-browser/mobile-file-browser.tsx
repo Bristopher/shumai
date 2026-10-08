@@ -215,7 +215,7 @@ export function MobileFileBrowser({
     onMutate: () => {
       return { files: [...pendingFilesToUpload] }
     },
-    onSuccess: async (data, _variables, context) => {
+    onSuccess: async (data, variables, context) => {
       const currentFiles = context?.files || []
       const filesProgressInfo = currentFiles
         .map((f) => {
@@ -247,6 +247,7 @@ export function MobileFileBrowser({
         storageBackend: (data.storageBackend as 's3' | 'local') || 'local',
         createdAssets: data.createdAssets,
         presignedUrls: data.presignedUrls,
+        parentId: variables.json.parentId,
         onFileFinished: async () => {
           await queryClient.invalidateQueries({ queryKey: ['search', teamId, assetId] })
         },

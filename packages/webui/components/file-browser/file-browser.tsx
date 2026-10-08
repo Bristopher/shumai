@@ -630,6 +630,7 @@ export function FileBrowser({
         storageBackend: (data.storageBackend as 's3' | 'local') || 'local',
         createdAssets: data.createdAssets,
         presignedUrls: data.presignedUrls,
+        parentId: variables.json.parentId,
         onFileFinished: async (fileId) => {
           await queryClient.invalidateQueries({
             queryKey: ['search', teamId, assetId],

@@ -22,6 +22,9 @@ import { sanitizeFilename } from '@shumai/core/src/utils/filename'
 import { getProxyType, isHtmlDocument, isOfficeDocument } from '@shumai/core/src/utils/mime'
 import { logger } from '@shumai/core/src/logger'
 import { HTTPException } from 'hono/http-exception'
+import { staleSweepIntervalMs, staleUploadHours } from './upload-env'
+
+export { staleSweepIntervalMs, staleUploadHours } from './upload-env'
 
 export class UploadService {
   constructor(private readonly prismaClient: typeof prisma = prisma) {}
@@ -410,6 +413,7 @@ export class UploadService {
       total: t.total || 0,
       uploaded: t.uploaded,
       createdAt: t.createdAt.toISOString(),
+      status: t.status,
     }))
 
     return { data: infos, pageInfo }
@@ -642,11 +646,16 @@ export class UploadService {
 
   private staleUploadTimer: ReturnType<typeof setTimeout> | null = null
 
-  startStaleUploadSweep(intervalMs = STALE_UPLOAD_SWEEP_MS) {
+  /**
+   * Start the periodic sweep. The interval (UPLOAD_STALE_SWEEP_INTERVAL_MINUTES) and the stale age
+   * (UPLOAD_STALE_AFTER_HOURS) are read once here, so a bad value warns once at startup.
+   */
+  startStaleUploadSweep(intervalMs = staleSweepIntervalMs(), olderThanHours = staleUploadHours()) {
     if (this.staleUploadTimer) return
+    logger.info({ intervalMs, olderThanHours }, 'Stale upload sweep enabled')
     const run = async () => {
       try {
-        await this.abandonStaleUploads()
+        await this.abandonStaleUploads(olderThanHours)
       } catch (err) {
         logger.error({ err }, 'Stale upload sweep failed')
       }
@@ -669,14 +678,6 @@ export function maxRequestBodySize(): number {
   return Number.isFinite(bytes) && bytes > 0 ? bytes : DEFAULT_MAX_REQUEST_BODY_SIZE
 }
 
-const DEFAULT_STALE_UPLOAD_HOURS = 24
 const STALE_UPLOAD_BATCH = 500
-const STALE_UPLOAD_SWEEP_MS = 15 * 60 * 1000
-
-/** Hours without progress before an upload counts as abandoned (UPLOAD_STALE_AFTER_HOURS, default 24). */
-export function staleUploadHours(): number {
-  const hours = Number(process.env.UPLOAD_STALE_AFTER_HOURS)
-  return Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_STALE_UPLOAD_HOURS
-}
 
 export const uploadService = new UploadService()

@@ -643,6 +643,22 @@ describe('UploadService', () => {
     expect(result.data[0].name).toBe('test-upload-task')
   })
 
+  it('reports a task the stale sweep gave up on as failed', async () => {
+    await prisma.task.create({
+      data: {
+        creatorId: userId,
+        total: 2,
+        uploaded: 0,
+        type: 'upload',
+        name: 'stale-upload-task',
+        status: TaskStatus.failed,
+      },
+    })
+
+    const result = await uploadService.listUploadTasks(userId, { first: 10 })
+    expect(result.data[0].status).toBe('failed')
+  })
+
   it('should correct the mediaType for .wma files that browser incorrectly reports as video', async () => {
     const req = {
       parentId: parentId,
