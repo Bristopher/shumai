@@ -14,6 +14,14 @@ vi.mock('@shumai/core/src/s3/s3', () => ({
   },
 }))
 
+// Only the RAW preview extraction is replaced, so the RAW branch of transcodeImage can be driven
+// with a prepared file (the dcraw_emu fallback result) without ExifTool or dcraw_emu installed.
+const extractRawMock = vi.hoisted(() => vi.fn())
+vi.mock('./raw-extract', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./raw-extract')>()),
+  extractAndValidateRawPreview: extractRawMock,
+}))
+
 // Windows keeps cached files open, which would make the temp dir cleanup fail with EBUSY.
 sharp.cache(false)
 
@@ -177,6 +185,48 @@ describe('EXIF orientation (real sharp)', () => {
 
     const meta = await sharp(fs.readFileSync(outputPath)).metadata()
     expect(meta.width).toBeLessThan(meta.height ?? 0)
+  })
+
+  describe('RAW inputs', () => {
+    const rawPreview = (previewPath: string, extra: Record<string, unknown>) => ({
+      previewPath,
+      cleanup: () => {},
+      width: STORED_WIDTH,
+      height: STORED_HEIGHT,
+      ...extra,
+    })
+
+    it('never auto-orients dcraw_emu output that still carries an Orientation tag', async () => {
+      // The dcraw fallback reports orientation undefined (already upright) but flags it as applied.
+      const tiffLike = path.join(tempDir, 'dcraw.jpg')
+      const outputPath = path.join(tempDir, 'dcraw-out.webp')
+      fs.writeFileSync(tiffLike, await makeJpeg(6))
+      extractRawMock.mockResolvedValueOnce(
+        rawPreview(tiffLike, { orientation: undefined, orientationApplied: true }),
+      )
+
+      await transcodeService.transcodeImage(path.join(tempDir, 'photo.cr2'), outputPath, 1000, 100)
+
+      const meta = await sharp(fs.readFileSync(outputPath)).metadata()
+      // Stored landscape stays landscape and the stored corners stay put: no second rotation.
+      expect(meta.width).toBe(STORED_WIDTH)
+      expect(meta.height).toBe(STORED_HEIGHT)
+      expect(await cornerColor(outputPath, 'TL')).toBe('TL')
+      expect(await cornerColor(outputPath, 'BR')).toBe('BR')
+    })
+
+    it('still auto-orients an embedded preview that has no container orientation', async () => {
+      const embedded = path.join(tempDir, 'embedded.jpg')
+      const outputPath = path.join(tempDir, 'embedded-out.webp')
+      fs.writeFileSync(embedded, await makeJpeg(6))
+      extractRawMock.mockResolvedValueOnce(rawPreview(embedded, { orientation: undefined }))
+
+      await transcodeService.transcodeImage(path.join(tempDir, 'photo.cr2'), outputPath, 1000, 100)
+
+      const meta = await sharp(fs.readFileSync(outputPath)).metadata()
+      expect(meta.width).toBe(STORED_HEIGHT)
+      expect(meta.height).toBe(STORED_WIDTH)
+    })
   })
 
   it('overlayAnnotationsOnBuffer keeps the displayed orientation', async () => {

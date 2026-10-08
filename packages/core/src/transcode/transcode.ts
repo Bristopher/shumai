@@ -1946,6 +1946,7 @@ export class TranscodeService {
 
     // RAW branch — extract embedded preview or decode RAW to temporary file + orientation, then treat as normal image
     let rawOrientation: number | undefined
+    let rawOutputUpright = false
     let rawCleanup: (() => void) | null = null
     if (typeof input === 'string' && isRawImage(input)) {
       const extracted = await extractAndValidateRawPreview(input)
@@ -1956,6 +1957,7 @@ export class TranscodeService {
       }
       input = extracted.previewPath
       rawOrientation = extracted.orientation
+      rawOutputUpright = extracted.orientationApplied === true
       rawCleanup = extracted.cleanup
     }
 
@@ -1966,7 +1968,8 @@ export class TranscodeService {
 
       // RAW previews are oriented from the container EXIF below, so only auto-orient other
       // inputs: the webp output drops the tag, which would leave camera portraits sideways.
-      const rawOrientationApplied = rawOrientation !== undefined
+      // dcraw_emu output is already upright, so it is never auto-oriented (no double rotation).
+      const rawOrientationApplied = rawOrientation !== undefined || rawOutputUpright
       const sharpInstance = sharp(input, orientedSharpOptions({ rawOrientationApplied }))
 
       if (isPreview) {
