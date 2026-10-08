@@ -60,11 +60,11 @@ async function run() {
   await metadataService.syncSystemFields().catch(console.error)
   await migrateLegacyAgentAvatars().catch(console.error)
   assetService.startCleanupJob()
+  notificationJobService.start()
+  workflowService.start()
   // Orphaned local multipart staging dirs (clients that never completed or aborted) are swept hourly.
   const stopMultipartSweep =
     s3Service instanceof LocalStorageService ? s3Service.startMultipartSweep() : undefined
-  notificationJobService.start()
-  workflowService.start()
   if (process.env.WORKFLOW_EXECUTOR === 'temporal') {
     const args = process.argv.slice(2)
     let workersOption = ''
@@ -187,8 +187,8 @@ async function run() {
   const shutdown = () => {
     console.log('\nShutting down gracefully...')
     assetService.stopCleanupJob()
-    stopMultipartSweep?.()
     server.stop(true)
+    stopMultipartSweep?.()
     process.exit(0)
   }
 
