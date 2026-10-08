@@ -19,6 +19,7 @@ import {
   isOfficeDocument,
 } from '@shumai/core/src/utils/mime'
 import { logger } from '@shumai/core/src/logger'
+import { sha256OfFile } from '@shumai/core/src/utils/hash'
 import { ApplicationFailure, Context } from '@temporalio/activity'
 import { getLocalTaskAbortSignal } from '@shumai/workflow-core'
 
@@ -81,12 +82,30 @@ async function ensureAssetNotPurging(assetKey: string): Promise<void> {
   }
 }
 
+/**
+ * Streams the already-downloaded original once and stores its SHA-256 on the asset so exact
+ * duplicates can be found later. Never fails processing: a missing hash only means the asset is
+ * skipped by duplicate detection until it is reprocessed.
+ */
+async function recordContentHash(assetId: string, filePath: string): Promise<void> {
+  try {
+    const contentHash = await sha256OfFile(filePath)
+    await prisma.asset.updateMany({
+      where: { id: assetId, status: { not: AssetStatus.pending_purge } },
+      data: { contentHash },
+    })
+  } catch (err) {
+    logger.warn({ err, assetId }, '[getMediaInfoActivity] Failed to record content hash')
+  }
+}
+
 export async function getMediaInfoActivity(params: {
   filePath: string
   assetId: string
   proxyType?: 'image' | 'video' | 'audio' | 'pdf' | null
   mediaType?: string
 }): Promise<PrismaJson.MediaInfo> {
+  await recordContentHash(params.assetId, params.filePath)
   try {
     const proxyType =
       params.proxyType || getProxyType(params.mediaType, params.filePath) || undefined
