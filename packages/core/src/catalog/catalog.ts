@@ -81,6 +81,8 @@ export interface CatalogAssetRecord extends CatalogEntryBase {
   storageKey: string | null
   mediaType: string | null
   sizeByte: string
+  /** SHA-256 (hex) of the stored original; null or absent when it was never recorded. */
+  contentHash?: string | null
   fileCount: number
   hasJpegPreview: boolean
   isDeleted: boolean
@@ -410,6 +412,7 @@ export function toAssetRecord(a: AssetWithCatalogData): CatalogAssetRecord {
     storageKey: a.storageKey?.key ?? null,
     mediaType: a.mediaType,
     sizeByte: a.sizeByte.toString(),
+    contentHash: a.contentHash,
     fileCount: a.fileCount,
     hasJpegPreview: a.hasJpegPreview,
     isDeleted: a.isDeleted,

@@ -11,6 +11,7 @@ vi.mock('@shumai/core/src/s3/s3', () => ({
   s3Service: {
     presign: vi.fn().mockResolvedValue('http://presigned-url.com'),
     getObjectSize: vi.fn().mockResolvedValue(100),
+    hashObject: vi.fn().mockResolvedValue('b'.repeat(64)),
     presignMultipart: vi.fn().mockResolvedValue({ url: 'http://signed-multipart-url.com' }),
     abortMultipartUpload: vi.fn().mockResolvedValue(undefined),
     deleteObject: vi.fn().mockResolvedValue(1),
@@ -185,6 +186,9 @@ describe('UploadService', () => {
     const updatedAsset = await prisma.asset.findUnique({ where: { id: asset.id } })
     // For video/image, status remains 'uploaded' while transcoding is pending
     expect(updatedAsset?.status).toBe(AssetStatus.uploaded)
+    // The content hash of the stored original is recorded for the storage catalog.
+    expect(s3Service.hashObject).toHaveBeenCalledWith(expect.any(String), 'test-key')
+    expect(updatedAsset?.contentHash).toBe('b'.repeat(64))
 
     const workflowTask = await prisma.workflowTask.findFirst({
       where: { assetId: asset.id, type: WorkflowTaskType.transcode_video },

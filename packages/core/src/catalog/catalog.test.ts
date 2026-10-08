@@ -224,6 +224,18 @@ describe('storage catalog', () => {
       expect(await assetRecord(f)).toBeUndefined()
     })
 
+    it('records the content hash of a file, and queues the file when it is set', async () => {
+      const f = await file('DSCF0002.RAF', rootId)
+      await drain()
+      expect((await assetRecord(f))?.contentHash).toBeNull()
+
+      const contentHash = 'a'.repeat(64)
+      await prisma.asset.update({ where: { id: f }, data: { contentHash } })
+      expect(await queued()).toEqual([f])
+      await drain()
+      expect((await assetRecord(f))?.contentHash).toBe(contentHash)
+    })
+
     it('keeps changes queued when storage fails, and writes them on the next pass', async () => {
       const f = await file('retry.JPG', rootId)
       vi.mocked(s3Service.putObject).mockRejectedValueOnce(new Error('storage down'))

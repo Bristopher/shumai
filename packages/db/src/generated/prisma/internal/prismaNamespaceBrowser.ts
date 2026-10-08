@@ -343,6 +343,7 @@ export const AssetScalarFieldEnum = {
   mediaType: 'mediaType',
   fileCount: 'fileCount',
   sizeByte: 'sizeByte',
+  contentHash: 'contentHash',
   status: 'status',
   transcodeTaskId: 'transcodeTaskId',
   uploadId: 'uploadId',

@@ -248,6 +248,7 @@ export async function restoreFromCatalog(options: RestoreOptions = {}): Promise<
         storageKeyId: a.storageKey ? (keyIds.get(a.storageKey) ?? null) : null,
         mediaType: a.mediaType,
         sizeByte: BigInt(a.sizeByte),
+        contentHash: a.contentHash ?? null,
         fileCount: a.fileCount,
         hasJpegPreview: a.hasJpegPreview,
         media:

@@ -82,8 +82,17 @@ export interface S3Object {
   contentType: string
 }
 
+/** SHA-256 (lowercase hex) of a byte stream, read once and never held in memory. */
+export async function sha256OfStream(stream: AsyncIterable<Uint8Array | string>): Promise<string> {
+  const hash = crypto.createHash('sha256')
+  for await (const chunk of stream) hash.update(chunk)
+  return hash.digest('hex')
+}
+
 export interface S3Service {
   getObjectSize: (bucket: string, key: string) => Promise<number>
+  /** SHA-256 (lowercase hex) of the stored object's content, streamed. */
+  hashObject: (bucket: string, key: string) => Promise<string>
   putObject: (
     bucket: string,
     key: string,
@@ -150,6 +159,12 @@ export class S3StorageService implements S3Service {
   async getObjectSize(bucket: string, key: string): Promise<number> {
     const res = await this.client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }))
     return res.ContentLength ?? 0
+  }
+
+  async hashObject(bucket: string, key: string): Promise<string> {
+    const res = await this.client.send(new GetObjectCommand({ Bucket: bucket, Key: key }))
+    if (!res.Body) throw new Error(`NoSuchKey: The specified key has no content.`)
+    return sha256OfStream(res.Body as unknown as AsyncIterable<Uint8Array>)
   }
 
   async putObject(
@@ -500,6 +515,21 @@ export class LocalStorageService implements S3Service {
         throw new Error(`NoSuchKey: The specified key does not exist.`, { cause: e })
       }
       throw e
+    }
+  }
+
+  async hashObject(bucket: string, key: string): Promise<string> {
+    const filePath = this.getFilePath(bucket, key)
+    const stream = fs.createReadStream(filePath)
+    try {
+      return await sha256OfStream(stream)
+    } catch (e: unknown) {
+      if (e instanceof Error && (e as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new Error(`NoSuchKey: The specified key does not exist.`, { cause: e })
+      }
+      throw e
+    } finally {
+      stream.destroy()
     }
   }
 

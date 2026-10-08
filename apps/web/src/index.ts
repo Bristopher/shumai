@@ -75,6 +75,41 @@ if (cliArgs[0] === 'restore-catalog') {
   }
 }
 
+if (cliArgs[0] === 'verify-catalog') {
+  const option = (name: string) => {
+    const i = cliArgs.indexOf(name)
+    return i !== -1 && cliArgs[i + 1] && !cliArgs[i + 1].startsWith('-')
+      ? cliArgs[i + 1]
+      : undefined
+  }
+  const asJson = cliArgs.includes('--json')
+  try {
+    const concurrency = option('--concurrency')
+    if (concurrency !== undefined && !(Number.isInteger(+concurrency) && +concurrency >= 1)) {
+      throw new Error('--concurrency must be a whole number of at least 1')
+    }
+    const { verifyCatalog, summarizeReport } = await import('@shumai/core/src/catalog/verify')
+    const deep = cliArgs.includes('--deep')
+    const report = await verifyCatalog({
+      deep,
+      backfillHashes: cliArgs.includes('--backfill-hashes'),
+      concurrency: concurrency ? +concurrency : undefined,
+      // Progress goes to stderr so --json leaves a clean report on stdout.
+      log: (line) => console.error(line),
+    })
+    if (asJson) console.log(JSON.stringify(report, null, 2))
+    else for (const line of summarizeReport(report)) console.log(line)
+    process.exit(report.ok ? 0 : 1)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Unknown error'
+    console.error(`Error: ${message}`)
+    console.error(
+      'Usage: shumai verify-catalog [--deep] [--json] [--concurrency <n>] [--backfill-hashes]',
+    )
+    process.exit(2)
+  }
+}
+
 async function run() {
   // Initialize workflows and activities for local executor mode
   initAgentWorkflows()

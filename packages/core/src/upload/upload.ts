@@ -22,6 +22,9 @@ import { sanitizeFilename } from '@shumai/core/src/utils/filename'
 import { getProxyType, isHtmlDocument, isOfficeDocument } from '@shumai/core/src/utils/mime'
 import { logger } from '@shumai/core/src/logger'
 
+/** Uploads up to this size are hashed before the upload is confirmed; larger ones in the background. */
+const INLINE_HASH_MAX_BYTES = 256 * 1024 * 1024
+
 export class UploadService {
   constructor(private readonly prismaClient: typeof prisma = prisma) {}
 
@@ -297,6 +300,28 @@ export class UploadService {
 
       await this.triggerPostUploadWorkflows(tx, asset.id, team.id, asset.projectId)
     })
+
+    await this.recordContentHash(asset.id, process.env.S3_BUCKET || 'shumai', key, size)
+  }
+
+  /**
+   * Stores the SHA-256 of an uploaded original so the storage catalog (and `verify-catalog --deep`) can detect
+   * silent corruption. Files go to storage directly from the browser, so this is one extra streamed read of the
+   * object. Up to INLINE_HASH_MAX_BYTES it finishes before the confirmation returns; larger files are hashed in
+   * the background so a big video does not hold up the upload queue. A failure leaves the hash empty (never
+   * fails the upload); verify-catalog fills it in later.
+   */
+  private async recordContentHash(assetId: string, bucket: string, key: string, size: number) {
+    const hashIt = async () => {
+      try {
+        const contentHash = await s3Service.hashObject(bucket, key)
+        await this.prismaClient.asset.updateMany({ where: { id: assetId }, data: { contentHash } })
+      } catch (err) {
+        logger.warn({ err, assetId, key }, 'Could not record the content hash of an upload')
+      }
+    }
+    if (size <= INLINE_HASH_MAX_BYTES) await hashIt()
+    else void hashIt()
   }
 
   async triggerPostUploadWorkflows(
