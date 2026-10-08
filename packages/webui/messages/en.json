@@ -1509,6 +1509,6 @@
   "stack_files": "{count} files",
   "stack_files_label": "Files in this shot",
   "stack_delete_title": "Delete stacked files?",
-  "stack_delete_warning": "These cards are stacks: deleting one deletes all {count} files listed below, not just the one shown. Untick any file you want to keep.",
+  "stack_delete_warning": "These cards are stacks: each one stands for several files ({count} in all, listed below). Tick every file you want to delete; nothing is ticked to start.",
   "stack_delete_confirm": "Delete {count} files"
 }

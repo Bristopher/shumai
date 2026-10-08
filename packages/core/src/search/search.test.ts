@@ -1182,6 +1182,63 @@ describe('SearchService — RAW + JPEG stacks', () => {
     expect(result.pageInfo.total).toBe(2)
   })
 
+  it('lists only the files the search matched as stack members', async () => {
+    const { root, ids } = await setupStackAssets({
+      a: [
+        { name: 'DSCF1.RAF', size: 30 },
+        { name: 'DSCF1.JPG', size: 10 },
+        { name: 'DSCF1.HEIC', size: 5 },
+      ],
+    })
+    const result = await searchService.search(root.id, {
+      recursively: true,
+      assetType: 'file',
+      operator: 'AND',
+      conditions: [{ field: 'name', operator: 'notContains', value: 'HEIC' }],
+      isSemantic: false,
+      sort: { field: 'name', order: 'asc' },
+      stack: true,
+    })
+    expect(result.data).toHaveLength(1)
+    expect(result.data[0]!.stack?.members.map((member) => member.id)).toEqual([
+      ids.get('a/DSCF1.JPG'),
+      ids.get('a/DSCF1.RAF'),
+    ])
+    expect(result.data[0]!.stack?.count).toBe(2)
+  })
+
+  it('never stacks a symlink with the real file', async () => {
+    const { root, ids } = await setupStackAssets({
+      a: [
+        { name: 'DSCF1.RAF', size: 30 },
+        { name: 'DSCF9.JPG', size: 10 },
+      ],
+    })
+    const raf = await prisma.asset.findUniqueOrThrow({ where: { id: ids.get('a/DSCF1.RAF')! } })
+    await prisma.asset.create({
+      data: {
+        name: 'DSCF1.JPG',
+        type: AssetType.symlink,
+        projectId: raf.projectId,
+        parentId: raf.parentId,
+        targetId: ids.get('a/DSCF9.JPG')!,
+        status: 'uploaded',
+      },
+    })
+    const result = await searchService.search(root.id, {
+      recursively: true,
+      assetType: 'file',
+      operator: 'AND',
+      conditions: [],
+      showSymlink: true,
+      isSemantic: false,
+      sort: { field: 'name', order: 'asc' },
+      stack: true,
+    })
+    expect(result.data).toHaveLength(3)
+    expect(result.data.every((item) => item.stack === undefined)).toBe(true)
+  })
+
   it('lists the files of a shot for the file viewer', async () => {
     const { ids } = await setupStackAssets({
       a: [

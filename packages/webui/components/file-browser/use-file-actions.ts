@@ -1,7 +1,7 @@
 'use client'
 
 import { client } from '@/ui/api/client'
-import { expandStackIds, isStacked, stackDeleteIds } from '@/ui/lib/stack-utils'
+import { expandStackIds, stackDeleteIds } from '@/ui/lib/stack-utils'
 import type { AssetInfo } from '@shumai/dtos'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { InferRequestType, InferResponseType } from 'hono/client'
@@ -186,8 +186,9 @@ export function useFileActions({
 
   const handleDelete = (items: AssetInfo[]) => {
     setItemsToDelete(items)
-    // Every file of a stacked card starts ticked; the dialog lists them so each can be unticked.
-    setStackDeleteSelection(new Set(expandStackIds(items.filter(isStacked))))
+    // A stacked card stands for several files, so none start ticked: the dialog lists them and the
+    // user ticks each file to delete (the confirm button stays disabled at zero).
+    setStackDeleteSelection(new Set())
     setIsDeleteDialogOpen(true)
   }
 

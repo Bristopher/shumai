@@ -15,6 +15,7 @@ export class SqlQueryBuilder {
   private limitCount: number | null = null
   private offsetCount: number | null = null
   private stackedRawJpeg = false
+  private stackedMemberIds = false
 
   select(fields: Prisma.Sql): this {
     this.selectSql = fields
@@ -52,10 +53,15 @@ export class SqlQueryBuilder {
    * least one of each; lone files and every other file type pass through untouched. The outer
    * query still aliases rows as `a` and adds `a.stack_key`, `a.stack_count` (files in the stack)
    * and `a.stack_size` (their total bytes), so select, order and count clauses work unchanged.
+   * Only `id`, `name`, `parent_id`, `size_byte`, `sort_index` and `created_at` pass through from
+   * the table, so an order or select clause may use no other `a.` column. With `memberIds`, each
+   * stacked row also carries `a.stack_ids`: the ids of the stack's files that matched the
+   * filters, cover first. Symlinks never stack.
    * Mirrors `groupPhotoStacks()` in utils/photo-stack.
    */
-  stackRawJpeg(enabled = true): this {
+  stackRawJpeg(enabled = true, options?: { memberIds?: boolean }): this {
     this.stackedRawJpeg = enabled
+    this.stackedMemberIds = enabled && !!options?.memberIds
     return this
   }
 
@@ -119,6 +125,17 @@ export class SqlQueryBuilder {
   private buildStackedFrom(where: Prisma.Sql): Prisma.Sql {
     const rawExtensions = [...STACK_RAW_EXTENSIONS]
     const previewExtensions = [...STACK_PREVIEW_EXTENSIONS]
+    // Symlinks never stack: they point at a file, they are not one, and a link named like a RAW
+    // must not pair with (or hide) the real file.
+    const notLink = Prisma.sql`a.type <> 'symlink'`
+    const memberIds = this.stackedMemberIds
+      ? Prisma.sql`,
+        CASE WHEN s.stack_on THEN array_agg(s.id::text ORDER BY s.stack_rank, s.name, s.id)
+          FILTER (WHERE s.stack_is_raw OR s.stack_is_preview)
+          OVER (PARTITION BY s.parent_id, s.stack_key) END AS stack_ids`
+      : Prisma.empty
+    // The derived tables carry only the columns the outer query reads (id, name, parent_id,
+    // size_byte, sort_index, created_at), not `a.*`: every row is held while the windows run.
     return Prisma.sql`(
       SELECT s.*,
         CASE WHEN s.stack_on THEN row_number() OVER (
@@ -128,17 +145,17 @@ export class SqlQueryBuilder {
         CASE WHEN s.stack_on THEN count(*) FILTER (WHERE s.stack_is_raw OR s.stack_is_preview)
           OVER (PARTITION BY s.parent_id, s.stack_key) ELSE 1 END AS stack_count,
         CASE WHEN s.stack_on THEN sum(COALESCE(s.size_byte, 0)) FILTER (WHERE s.stack_is_raw OR s.stack_is_preview)
-          OVER (PARTITION BY s.parent_id, s.stack_key) ELSE COALESCE(s.size_byte, 0) END AS stack_size
+          OVER (PARTITION BY s.parent_id, s.stack_key) ELSE COALESCE(s.size_byte, 0) END AS stack_size${memberIds}
       FROM (
         SELECT g.*,
           (g.stack_is_raw OR g.stack_is_preview)
             AND bool_or(g.stack_is_raw) OVER (PARTITION BY g.parent_id, g.stack_key)
             AND bool_or(g.stack_is_preview) OVER (PARTITION BY g.parent_id, g.stack_key) AS stack_on
         FROM (
-          SELECT a.*,
+          SELECT a.id, a.name, a.parent_id, a.size_byte, a.sort_index, a.created_at,
             ${STACK_BASE_NAME_SQL} AS stack_key,
-            COALESCE(${STACK_EXTENSION_SQL} = ANY(${rawExtensions}::text[]), false) AS stack_is_raw,
-            COALESCE(${STACK_EXTENSION_SQL} = ANY(${previewExtensions}::text[]), false) AS stack_is_preview,
+            (${notLink} AND COALESCE(${STACK_EXTENSION_SQL} = ANY(${rawExtensions}::text[]), false)) AS stack_is_raw,
+            (${notLink} AND COALESCE(${STACK_EXTENSION_SQL} = ANY(${previewExtensions}::text[]), false)) AS stack_is_preview,
             COALESCE(array_position(${previewExtensions}::text[], ${STACK_EXTENSION_SQL}), 100) AS stack_rank
           FROM ${this.fromSql} ${where}
         ) g

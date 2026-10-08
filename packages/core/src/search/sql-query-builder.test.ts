@@ -61,6 +61,40 @@ describe('SqlQueryBuilder', () => {
     })
   })
 
+  describe('stackRawJpeg: matched members and symlinks', () => {
+    const build = (memberIds: boolean) =>
+      new SqlQueryBuilder()
+        .select(Prisma.sql`a.id`)
+        .from(Prisma.sql`assets a`)
+        .addWhere(Prisma.sql`a.is_deleted = false`)
+        .stackRawJpeg(true, { memberIds })
+        .build()
+
+    it('returns the matched ids of each stack only when asked', () => {
+      expect(build(true).text).toContain('array_agg(s.id::text ORDER BY s.stack_rank, s.name, s.id)')
+      expect(build(true).text).toContain('AS stack_ids')
+      expect(build(false).text).not.toContain('stack_ids')
+    })
+
+    it('computes the ids over the filtered rows, inside the WHERE', () => {
+      const text = build(true).text
+      // The filters sit in the innermost derived table, so the window only sees matched rows.
+      expect(text).toMatch(/FROM assets a WHERE a\.is_deleted = false\s*\) g/)
+    })
+
+    it('never stacks symlinks', () => {
+      const text = build(false).text
+      expect(text).toContain("a.type <> 'symlink'")
+      expect(text.match(/a\.type <> 'symlink'/g)).toHaveLength(2)
+    })
+
+    it('carries only the columns the outer query needs', () => {
+      const text = build(false).text
+      expect(text).toContain('SELECT a.id, a.name, a.parent_id, a.size_byte, a.sort_index, a.created_at')
+      expect(text).not.toContain('SELECT a.*')
+    })
+  })
+
   it('throws an error if FROM clause is missing', () => {
     const builder = new SqlQueryBuilder().select(Prisma.sql`id`)
     expect(() => builder.build()).toThrow('FROM clause is required')

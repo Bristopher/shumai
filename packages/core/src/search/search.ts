@@ -240,9 +240,9 @@ export class SearchService {
 
     if (stacked) {
       builder
-        .stackRawJpeg()
+        .stackRawJpeg(true, { memberIds: true })
         .select(
-          Prisma.sql`a.id as "assetId", a.stack_count as "stackCount", a.parent_id as "parentId", a.stack_key as "stackKey"`,
+          Prisma.sql`a.id as "assetId", a.stack_count as "stackCount", a.stack_ids as "stackIds"`,
         )
     }
 
@@ -346,7 +346,7 @@ export class SearchService {
     const query = builder.build()
     const matches =
       await this.prismaClient.$queryRaw<
-        { assetId: string; stackCount?: bigint; parentId?: string | null; stackKey?: string }[]
+        { assetId: string; stackCount?: bigint; stackIds?: string[] | null }[]
       >(query)
 
     const hasNextPage = matches.length > limit
@@ -468,23 +468,26 @@ export class SearchService {
 
   /**
    * The files of each stacked row, keyed by the shown file's id, in display order. Rows that are
-   * not part of a RAW + JPEG shot are left out. The members come from one query over the folders
-   * and base names on the page, paired with the same rules as the SQL (`groupPhotoStacks`).
+   * not part of a RAW + JPEG shot are left out. The members are exactly the files the search
+   * matched (the SQL returns their ids), so a card never lists, and a delete, move or copy never
+   * reaches, a file the filters excluded. Names come from one lookup by id and are ordered by
+   * `groupPhotoStacks`, which holds the pairing rules.
    */
   private async loadStackMembers(
-    rows: { assetId: string; stackCount?: bigint; parentId?: string | null; stackKey?: string }[],
+    rows: { assetId: string; stackCount?: bigint; stackIds?: string[] | null }[],
   ): Promise<Map<string, StackMember[]>> {
-    const multi = rows.filter((r) => Number(r.stackCount ?? 1) > 1 && r.parentId && r.stackKey)
+    const multi = rows.filter((r) => Number(r.stackCount ?? 1) > 1 && (r.stackIds?.length ?? 0) > 1)
     const out = new Map<string, StackMember[]>()
     if (multi.length === 0) return out
 
-    const files = await this.listStackCandidates(
-      multi.map((r) => r.parentId!),
-      multi.map((r) => r.stackKey!),
-    )
-    const byKey = new Map(groupPhotoStacks(files).map((stack) => [stack.key, stack]))
+    const found = await this.prismaClient.asset.findMany({
+      where: { id: { in: [...new Set(multi.flatMap((r) => r.stackIds!))] }, isDeleted: false },
+      select: { id: true, name: true, parentId: true },
+    })
+    const byId = new Map(found.map((f) => [f.id, f]))
     for (const r of multi) {
-      const stack = byKey.get(`${r.parentId}/${r.stackKey}`)
+      const files = r.stackIds!.flatMap((id) => byId.get(id) ?? [])
+      const stack = groupPhotoStacks(files).find((st) => st.members.some((m) => m.id === r.assetId))
       if (stack)
         out.set(
           r.assetId,
