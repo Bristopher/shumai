@@ -1,4 +1,6 @@
-import { RAW_EXTENSIONS as RAW_EXTENSION_NAMES } from '@shumai/dtos'
+// Deep import on purpose: this file is reachable from the Temporal workflow bundle (via utils/mime),
+// and the dtos index pulls in modules that import @shumai/db, which webpack cannot resolve there.
+import { RAW_EXTENSIONS as RAW_EXTENSION_NAMES } from '@shumai/dtos/src/file-types'
 
 /**
  * Centralized set of recognized camera RAW file extensions, with the leading dot. The list itself
