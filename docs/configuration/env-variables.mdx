@@ -78,7 +78,7 @@ The restore recreates projects, folders, files, metadata fields and values, and 
 
 ### Checking the catalog and your files
 
-Each file's SHA-256 fingerprint is recorded when its upload is confirmed (files uploaded before this was added have none yet) and is kept in the catalog. `shumai verify-catalog` compares the catalog with what is actually in storage, without changing anything:
+Each file's SHA-256 fingerprint is computed in the background shortly after its upload is confirmed (files uploaded before this was added have none yet, and neither do files still waiting in the hashing queue when the server stops) and is kept in the catalog. Hashing reads the stored file once, two files at a time; set `CONTENT_HASH_CONCURRENCY` to change that number. `shumai verify-catalog` compares the catalog with what is actually in storage, without changing anything:
 
 - `shumai verify-catalog` checks that every file the catalog lists exists in storage and has the recorded size.
 - `shumai verify-catalog --deep` also reads every file and compares its fingerprint, which catches silent corruption. It reads your whole library, so run it off-peak.

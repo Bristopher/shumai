@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+import os from 'node:os'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AssetStatus, AssetType, prisma } from '@shumai/db'
 import { setupTestDbHooks } from '@shumai/db/test'
@@ -19,6 +21,10 @@ vi.mock('@shumai/core/src/s3/s3', () => ({
   s3Service: {
     putObject: vi.fn(async (_bucket: string, key: string, body: Buffer) => {
       store.set(key, Buffer.from(body))
+    }),
+    // Snapshots are streamed to a temp file and uploaded from it.
+    uploadFileToKey: vi.fn(async (filePath: string, key: string) => {
+      store.set(key, fs.readFileSync(filePath))
     }),
     deleteObject: vi.fn(async (_bucket: string, key: string) => (store.delete(key) ? 1 : 0)),
     getObject: vi.fn(async (_bucket: string, key: string) => {
@@ -246,6 +252,28 @@ describe('storage catalog', () => {
       expect(await assetRecord(f)).toBeDefined()
     })
 
+    // If a transaction were held across the storage write, this update would block on the queue row and hang.
+    it('keeps an object that changed again while its segment was being written', async () => {
+      const f = await file('busy.JPG', rootId)
+      vi.mocked(s3Service.putObject).mockImplementationOnce(async (_bucket, key, body) => {
+        store.set(key, Buffer.from(body as Buffer))
+        await prisma.asset.update({ where: { id: f }, data: { name: 'busy-renamed.JPG' } })
+      })
+      await service.syncOnce()
+      // the rename happened after the segment was read, so it is still queued
+      expect(await queued()).toEqual([f])
+      await drain()
+      expect((await assetRecord(f))?.name).toBe('busy-renamed.JPG')
+    })
+
+    it('writes the snapshot from a temp file and cleans the temp file up', async () => {
+      const before = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('shumai-catalog-'))
+      await service.compact()
+      expect(s3Service.uploadFileToKey).toHaveBeenCalled()
+      const after = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('shumai-catalog-'))
+      expect(after).toEqual(before)
+    })
+
     it('compacts the log into a new snapshot and removes what it replaces', async () => {
       service = new StorageCatalogService({ compactAfterSegments: 3 })
       const ids: string[] = []
@@ -337,6 +365,26 @@ describe('storage catalog', () => {
       // Running it again changes nothing.
       const again = await restoreFromCatalog()
       expect(again.assets).toEqual({ created: 0, skipped: 4 })
+    })
+
+    it('skips uploads that never finished instead of restoring them as uploading', async () => {
+      const done = await file('done.JPG', rootId)
+      const pending = await file('half.RAF', rootId)
+      await prisma.asset.update({ where: { id: pending }, data: { status: AssetStatus.uploading } })
+      await drain()
+
+      // Lose the library (the catalog stays in storage).
+      await prisma.project.update({ where: { id: projectId }, data: { rootFolderId: null } })
+      await prisma.asset.deleteMany({ where: { projectId } })
+      await prisma.project.delete({ where: { id: projectId } })
+      store.set('files/done.JPG-key/done.JPG', Buffer.from('jpg'))
+
+      const report = await restoreFromCatalog()
+      expect(report.unfinishedUploads).toEqual([pending])
+      expect(report.assets.created).toBe(2) // root folder and done.JPG
+      expect(await prisma.asset.findUnique({ where: { id: pending } })).toBeNull()
+      expect(await prisma.asset.findUnique({ where: { id: done } })).not.toBeNull()
+      expect(await prisma.asset.count({ where: { status: AssetStatus.uploading } })).toBe(0)
     })
 
     it('refuses to guess a team that does not exist', async () => {

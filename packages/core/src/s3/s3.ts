@@ -23,6 +23,7 @@ import { Readable } from 'stream'
 import { pipeline } from 'stream/promises'
 import { ulid } from 'ulid'
 import { LruTtlCache } from '../cache/lru-ttl-cache'
+import { sha256OfStream } from '../utils/hash'
 import { detectSupportedMimeType } from '../utils/mime'
 
 export function signLocalUrl(bucket: string, key: string): string {
@@ -82,11 +83,18 @@ export interface S3Object {
   contentType: string
 }
 
-/** SHA-256 (lowercase hex) of a byte stream, read once and never held in memory. */
-export async function sha256OfStream(stream: AsyncIterable<Uint8Array | string>): Promise<string> {
-  const hash = crypto.createHash('sha256')
-  for await (const chunk of stream) hash.update(chunk)
-  return hash.digest('hex')
+/** Error for an object that is not in storage. `name` matches what the AWS SDK reports. */
+function noSuchKey(message: string, cause?: unknown): Error {
+  const err = new Error(`NoSuchKey: ${message}`, { cause })
+  err.name = 'NoSuchKey'
+  return err
+}
+
+/** True for the AWS SDK's "object not found" errors (NoSuchKey, NotFound, or any HTTP 404). */
+export function isNotFoundError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false
+  const e = err as { name?: unknown; $metadata?: { httpStatusCode?: number } }
+  return e.name === 'NoSuchKey' || e.name === 'NotFound' || e.$metadata?.httpStatusCode === 404
 }
 
 export interface S3Service {
@@ -163,7 +171,7 @@ export class S3StorageService implements S3Service {
 
   async hashObject(bucket: string, key: string): Promise<string> {
     const res = await this.client.send(new GetObjectCommand({ Bucket: bucket, Key: key }))
-    if (!res.Body) throw new Error(`NoSuchKey: The specified key has no content.`)
+    if (!res.Body) throw noSuchKey('The specified key has no content.')
     return sha256OfStream(res.Body as unknown as AsyncIterable<Uint8Array>)
   }
 
@@ -298,7 +306,10 @@ export class S3StorageService implements S3Service {
         eTag: res.ETag || '',
       }
     } catch (err: unknown) {
-      throw new Error(`NoSuchKey: The specified key does not exist.`, { cause: err })
+      // Only a 404 means the object is not there. Access denied, throttling, 5xx and timeouts are rethrown
+      // unchanged so callers (verify-catalog) can tell "missing" from "could not check".
+      if (isNotFoundError(err)) throw noSuchKey('The specified key does not exist.', err)
+      throw err
     }
   }
 
@@ -512,7 +523,7 @@ export class LocalStorageService implements S3Service {
       return stats.size
     } catch (e: unknown) {
       if (e instanceof Error && (e as NodeJS.ErrnoException).code === 'ENOENT') {
-        throw new Error(`NoSuchKey: The specified key does not exist.`, { cause: e })
+        throw noSuchKey('The specified key does not exist.', e)
       }
       throw e
     }
@@ -525,7 +536,7 @@ export class LocalStorageService implements S3Service {
       return await sha256OfStream(stream)
     } catch (e: unknown) {
       if (e instanceof Error && (e as NodeJS.ErrnoException).code === 'ENOENT') {
-        throw new Error(`NoSuchKey: The specified key does not exist.`, { cause: e })
+        throw noSuchKey('The specified key does not exist.', e)
       }
       throw e
     } finally {
@@ -572,7 +583,7 @@ export class LocalStorageService implements S3Service {
       }
     } catch (e: unknown) {
       if (e instanceof Error && (e as NodeJS.ErrnoException).code === 'ENOENT') {
-        throw new Error(`NoSuchKey: The specified key does not exist.`, { cause: e })
+        throw noSuchKey('The specified key does not exist.', e)
       }
       throw e
     }
@@ -653,7 +664,7 @@ export class LocalStorageService implements S3Service {
       }
     } catch (e: unknown) {
       if (e instanceof Error && (e as NodeJS.ErrnoException).code === 'ENOENT') {
-        throw new Error(`NoSuchKey: The specified key does not exist.`, { cause: e })
+        throw noSuchKey('The specified key does not exist.', e)
       }
       throw e
     }

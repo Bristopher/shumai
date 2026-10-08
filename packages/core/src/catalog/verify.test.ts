@@ -212,5 +212,48 @@ describe('content hashes and verify-catalog (local storage)', () => {
       expect(report.missing).toEqual([])
       expect(report.errors[0]).toMatchObject({ error: 'connection reset' })
     })
+
+    it('classifies only 404-style errors as missing, everything else as an error', async () => {
+      const failing = (make: () => unknown) => ({
+        headObject: async () => {
+          throw make()
+        },
+        hashObject: storage.hashObject.bind(storage),
+      })
+      const withStatus = (name: string, status: number) =>
+        Object.assign(new Error(name), { name, $metadata: { httpStatusCode: status } })
+      const records = [record('files/a/one.RAF', 'x')]
+
+      for (const make of [
+        () => withStatus('NoSuchKey', 404),
+        () => withStatus('NotFound', 404),
+        () => Object.assign(new Error('odd'), { $metadata: { httpStatusCode: 404 } }),
+      ]) {
+        const report = await verifyRecords(records, failing(make), BUCKET)
+        expect(report.missing).toHaveLength(1)
+        expect(report.errors).toEqual([])
+      }
+
+      for (const make of [
+        () => withStatus('AccessDenied', 403),
+        () => withStatus('InternalError', 500),
+        () => withStatus('SlowDown', 503),
+        () => Object.assign(new Error('timed out'), { name: 'TimeoutError' }),
+        // A message that merely mentions NoSuchKey is not a 404.
+        () => new Error('NoSuchKey appears in this unrelated failure'),
+      ]) {
+        const report = await verifyRecords(records, failing(make), BUCKET)
+        expect(report.missing).toEqual([])
+        expect(report.errors).toHaveLength(1)
+        expect(report.ok).toBe(false)
+      }
+    })
+  })
+
+  describe('LocalStorageService errors', () => {
+    it('reports a missing object as NoSuchKey so verify classifies it as missing', async () => {
+      const err = await storage.headObject(BUCKET, 'files/nope').catch((e: unknown) => e)
+      expect(err).toMatchObject({ name: 'NoSuchKey' })
+    })
   })
 })

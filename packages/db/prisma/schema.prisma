@@ -530,8 +530,7 @@ model Asset {
   mediaType         String?      @map("media_type")
   fileCount         Int          @default(0) @map("file_count")
   sizeByte          BigInt       @default(0) @map("size_byte")
-  /// SHA-256 (lowercase hex) of the stored original, set when an upload is confirmed. Null for files uploaded
-  /// before it was recorded, folders and symlinks; `shumai verify-catalog --deep --backfill-hashes` fills it in.
+  /// SHA-256 (lowercase hex) of the original file. Null until it has been computed, and for folders and symlinks.
   contentHash       String?      @map("content_hash")
   status            AssetStatus
   transcodeTaskId   String?      @map("transcode_task_id")
@@ -595,6 +594,7 @@ model Asset {
   @@index([isDeleted])
   @@index([deletedAt])
   @@index([agentId])
+  @@index([projectId, contentHash])
   @@index([name], name: "assets_name_idx")
   @@index([nameNgram], type: Gin)
   @@unique([parentId, targetId], name: "parentIdTargetId")

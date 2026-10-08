@@ -28,6 +28,11 @@ export interface RestoreReport {
   metadataValues: number
   /** Files whose original is not in storage (restored anyway, so the gap is visible in the app). */
   missingFiles: string[]
+  /**
+   * Files whose upload had not finished when the catalog last saw them. They have no complete original to
+   * restore, so they are skipped (restoring them as `uploading` would leave rows that never finish).
+   */
+  unfinishedUploads: string[]
   /** Assets whose parent is in neither the catalog nor the database; restored without a parent. */
   orphans: string[]
 }
@@ -60,6 +65,7 @@ export async function restoreFromCatalog(options: RestoreOptions = {}): Promise<
     assets: { created: 0, skipped: 0 },
     metadataValues: 0,
     missingFiles: [],
+    unfinishedUploads: [],
     orphans: [],
   }
 
@@ -74,7 +80,11 @@ export async function restoreFromCatalog(options: RestoreOptions = {}): Promise<
 
   const fields = records.filter((r): r is CatalogFieldRecord => r.kind === 'metadataField')
   const projects = records.filter((r): r is CatalogProjectRecord => r.kind === 'project')
-  const assets = records.filter((r): r is CatalogAssetRecord => r.kind === 'asset')
+  const catalogAssets = records.filter((r): r is CatalogAssetRecord => r.kind === 'asset')
+  const assets = catalogAssets.filter((a) => a.status !== AssetStatus.uploading)
+  report.unfinishedUploads = catalogAssets
+    .filter((a) => a.status === AssetStatus.uploading)
+    .map((a) => a.id)
 
   // Map teams and creators that do not exist here.
   const teamIds = new Set(
@@ -184,7 +194,7 @@ export async function restoreFromCatalog(options: RestoreOptions = {}): Promise<
   log(
     `Restore plan: ${newProjects.length} projects, ${newFields.length} fields, ${newAssets.length} assets, ` +
       `${valueCount} metadata values; ${report.missingFiles.length} files missing in storage, ` +
-      `${report.orphans.length} without a parent`,
+      `${report.orphans.length} without a parent; ${report.unfinishedUploads.length} unfinished uploads skipped`,
   )
   if (options.dryRun) return report
 
@@ -260,7 +270,8 @@ export async function restoreFromCatalog(options: RestoreOptions = {}): Promise<
       },
     })
   }
-  for (const a of newAssets.filter((x) => x.targetId)) {
+  const unfinished = new Set(report.unfinishedUploads)
+  for (const a of newAssets.filter((x) => x.targetId && !unfinished.has(x.targetId))) {
     await prisma.asset.update({ where: { id: a.id }, data: { targetId: a.targetId } })
   }
 

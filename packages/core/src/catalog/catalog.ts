@@ -1,4 +1,10 @@
-import { gunzipSync, gzipSync } from 'node:zlib'
+import { createWriteStream } from 'node:fs'
+import { mkdtemp, rm, stat } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import { createGzip, gunzipSync, gzipSync } from 'node:zlib'
 import { prisma, Prisma } from '@shumai/db'
 import { logger } from '@shumai/core/src/logger'
 import { s3Service } from '@shumai/core/src/s3/s3'
@@ -228,21 +234,25 @@ export class StorageCatalogService {
   }
 
   /**
-   * Takes up to one batch of queued changes and writes them as one log segment. Runs in a transaction that
-   * is only committed after the segment is in storage, so a failed write leaves the changes queued.
+   * Writes one batch of queued changes as one log segment, without holding a transaction open across storage:
+   *  1. a short transaction (under the advisory lock) reads the batch, builds the segment and reserves its
+   *     sequence number, so segments are numbered in the order their contents were read;
+   *  2. the segment is written to storage, outside any transaction;
+   *  3. a second short transaction removes the queue rows that were written.
+   * Step 3 only removes a row that is unchanged since step 1 (same queued_at; the triggers refresh queued_at
+   * when an already-queued object changes again), so a change made while the segment was uploading stays
+   * queued for the next pass. A failure or crash before step 3 leaves the rows queued and the retry writes
+   * the same current state under a new sequence number: appending is idempotent, a sequence number may be
+   * skipped.
    */
   async appendLogSegment(): Promise<number> {
-    return prisma.$transaction(
+    const batch = await prisma.$transaction(
       async (tx) => {
-        if (!(await this.lock(tx))) return 0
-        const rows = await tx.$queryRaw<{ id: string }[]>`
-          DELETE FROM storage_catalog_queue
-          WHERE id IN (
-            SELECT id FROM storage_catalog_queue ORDER BY queued_at LIMIT ${this.batchSize}
-            FOR UPDATE SKIP LOCKED
-          )
-          RETURNING id`
-        if (rows.length === 0) return 0
+        if (!(await this.lock(tx))) return null
+        const rows = await tx.$queryRaw<{ id: string; stamp: string }[]>`
+          SELECT id, queued_at::text AS stamp FROM storage_catalog_queue
+          ORDER BY queued_at, id LIMIT ${this.batchSize}`
+        if (rows.length === 0) return null
 
         const entries = await loadEntries(
           tx,
@@ -256,17 +266,27 @@ export class StorageCatalogService {
           WHERE id = 1
           RETURNING last_seq AS seq`
         if (!next) throw new Error('Storage catalog has no snapshot yet')
-        await s3Service.putObject(
-          catalogBucket(),
-          catalogLogKey(next.seq),
-          body,
-          body.length,
-          'application/gzip',
-        )
-        return rows.length
+        return { rows, body, seq: next.seq }
       },
       { timeout: 120_000 },
     )
+    if (!batch) return 0
+
+    await s3Service.putObject(
+      catalogBucket(),
+      catalogLogKey(batch.seq),
+      batch.body,
+      batch.body.length,
+      'application/gzip',
+    )
+
+    const ids = batch.rows.map((r) => r.id)
+    const stamps = batch.rows.map((r) => r.stamp)
+    await prisma.$executeRaw`
+      DELETE FROM storage_catalog_queue q
+      USING unnest(${ids}::text[], ${stamps}::text[]) AS written(id, stamp)
+      WHERE q.id = written.id AND q.queued_at::text = written.stamp`
+    return batch.rows.length
   }
 
   /**
@@ -281,48 +301,55 @@ export class StorageCatalogService {
         const prev = await tx.storageCatalogState.findUnique({ where: { id: 1 } })
         await tx.$executeRaw`DELETE FROM storage_catalog_queue`
 
-        const body = encode(await snapshotEntries(tx))
-
-        // Never reuse a sequence number: after the catalog was switched off the state is gone, so continue
-        // after whatever is already in storage and clear it out once the new snapshot is written.
-        let old: string[]
-        let seq: bigint
-        if (prev) {
-          seq = prev.lastSeq + 1n
-          old = [catalogSnapshotKey(prev.snapshotSeq)]
-          for (let s = prev.snapshotSeq + 1n; s < seq; s++) old.push(catalogLogKey(s))
-        } else {
-          old = (await s3Service.listObjects(catalogBucket(), CATALOG_PREFIX)).filter(
-            (k) => catalogKeySeq(k) !== null,
+        // The snapshot is streamed through gzip into a temp file and uploaded from there, so memory stays flat
+        // however big the library is (one page of assets at a time, never the whole library).
+        const dir = await mkdtemp(path.join(os.tmpdir(), 'shumai-catalog-'))
+        const snapshotFile = path.join(dir, 'snapshot.jsonl.gz')
+        try {
+          await pipeline(
+            Readable.from(snapshotLines(tx)),
+            createGzip(),
+            createWriteStream(snapshotFile),
           )
-          seq = old.reduce((max, k) => (catalogKeySeq(k)! > max ? catalogKeySeq(k)! : max), 0n) + 1n
-        }
+          const snapshotBytes = BigInt((await stat(snapshotFile)).size)
+          // Never reuse a sequence number: after the catalog was switched off the state is gone, so continue
+          // after whatever is already in storage and clear it out once the new snapshot is written.
+          let old: string[]
+          let seq: bigint
+          if (prev) {
+            seq = prev.lastSeq + 1n
+            old = [catalogSnapshotKey(prev.snapshotSeq)]
+            for (let s = prev.snapshotSeq + 1n; s < seq; s++) old.push(catalogLogKey(s))
+          } else {
+            old = (await s3Service.listObjects(catalogBucket(), CATALOG_PREFIX)).filter(
+              (k) => catalogKeySeq(k) !== null,
+            )
+            seq =
+              old.reduce((max, k) => (catalogKeySeq(k)! > max ? catalogKeySeq(k)! : max), 0n) + 1n
+          }
 
-        const state = {
-          lastSeq: seq,
-          snapshotSeq: seq,
-          snapshotBytes: BigInt(body.length),
-          logSegments: 0,
-          logBytes: 0n,
-          updatedAt: new Date(),
+          const state = {
+            lastSeq: seq,
+            snapshotSeq: seq,
+            snapshotBytes,
+            logSegments: 0,
+            logBytes: 0n,
+            updatedAt: new Date(),
+          }
+          await tx.storageCatalogState.upsert({
+            where: { id: 1 },
+            create: { id: 1, ...state },
+            update: state,
+          })
+          await s3Service.uploadFileToKey(snapshotFile, catalogSnapshotKey(seq), 'application/gzip')
+          logger.info(
+            { seq, bytes: Number(snapshotBytes), replaced: old.length },
+            'Storage catalog: wrote a snapshot',
+          )
+          return old
+        } finally {
+          await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
         }
-        await tx.storageCatalogState.upsert({
-          where: { id: 1 },
-          create: { id: 1, ...state },
-          update: state,
-        })
-        await s3Service.putObject(
-          catalogBucket(),
-          catalogSnapshotKey(seq),
-          body,
-          body.length,
-          'application/gzip',
-        )
-        logger.info(
-          { seq, bytes: body.length, replaced: old.length },
-          'Storage catalog: wrote a snapshot',
-        )
-        return old
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 600_000 },
     )
@@ -365,12 +392,13 @@ async function loadEntries(tx: Tx, ids: string[]): Promise<CatalogEntry[]> {
   return ids.map((ref) => found.get(ref) ?? { v: CATALOG_RECORD_VERSION, ref, deleted: true })
 }
 
-async function snapshotEntries(tx: Tx): Promise<CatalogEntry[]> {
-  const entries: CatalogEntry[] = []
+/** The whole library as JSON lines (metadata fields, projects, then assets a page at a time). */
+async function* snapshotLines(tx: Tx): AsyncGenerator<string> {
+  const line = (e: CatalogEntry) => JSON.stringify(e) + '\n'
   for (const f of await tx.metadataField.findMany({ orderBy: { key: 'asc' } }))
-    entries.push(toFieldRecord(f))
+    yield line(toFieldRecord(f))
   for (const p of await tx.project.findMany({ orderBy: { id: 'asc' } }))
-    entries.push(toProjectRecord(p))
+    yield line(toProjectRecord(p))
   let cursor: string | undefined
   for (;;) {
     const page: AssetWithCatalogData[] = await tx.asset.findMany({
@@ -379,11 +407,10 @@ async function snapshotEntries(tx: Tx): Promise<CatalogEntry[]> {
       take: SNAPSHOT_PAGE_SIZE,
       ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
     })
-    for (const a of page) entries.push(toAssetRecord(a))
+    for (const a of page) yield line(toAssetRecord(a))
     if (page.length < SNAPSHOT_PAGE_SIZE) break
     cursor = page[page.length - 1].id
   }
-  return entries
 }
 
 export function toAssetRecord(a: AssetWithCatalogData): CatalogAssetRecord {

@@ -6977,8 +6977,7 @@ export type $AssetPayload<ExtArgs extends runtime.Types.Extensions.InternalArgs 
     fileCount: number
     sizeByte: bigint
     /**
-     * SHA-256 (lowercase hex) of the stored original, set when an upload is confirmed. Null for files uploaded
-     * before it was recorded, folders and symlinks; `shumai verify-catalog --deep --backfill-hashes` fills it in.
+     * SHA-256 (lowercase hex) of the original file. Null until it has been computed, and for folders and symlinks.
      */
     contentHash: string | null
     status: $Enums.AssetStatus

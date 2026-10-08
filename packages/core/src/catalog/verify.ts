@@ -1,4 +1,4 @@
-import type { S3Service } from '@shumai/core/src/s3/s3'
+import { isNotFoundError, type S3Service } from '@shumai/core/src/s3/s3'
 import type { CatalogAssetRecord, CatalogRecord } from './catalog'
 
 /**
@@ -65,7 +65,12 @@ async function runLimited<T>(items: T[], limit: number, fn: (item: T) => Promise
 }
 
 const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err))
-const isMissing = (err: unknown) => errorMessage(err).includes('NoSuchKey')
+/**
+ * An object is "missing" only when storage says it is not there (NoSuchKey, NotFound or HTTP 404). Anything
+ * else (AccessDenied, throttling, 5xx, timeouts) is an error, not a missing file, so a storage outage or a
+ * bad credential never reads as "your files are gone".
+ */
+export const isMissing = isNotFoundError
 
 /** Stored originals: files with a storage key whose upload finished. */
 export function storedFiles(records: CatalogRecord[]): CatalogAssetRecord[] {

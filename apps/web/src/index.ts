@@ -10,6 +10,7 @@ import { app } from '@shumai/api'
 import { assetService } from '@shumai/core/src/asset/asset'
 import { storageCatalogService } from '@shumai/core/src/catalog/catalog'
 import { metadataService } from '@shumai/core/src/metadata/metadata'
+import { contentHashQueue } from '@shumai/core/src/upload/upload'
 import { initTranscodeWorkflows } from '@shumai/transcode'
 import { workflowService } from '@shumai/workflow-core'
 import { migrateLegacyAgentAvatars } from '@shumai/core/src/agent/migration'
@@ -18,6 +19,9 @@ import { handleDaemonCommands } from '@shumai/core/src/utils/daemon'
 import { authService } from '@shumai/core/src/auth/auth'
 import { sandboxService } from '@shumai/core'
 import { notificationJobService } from '@shumai/core/src/notification/notification-job'
+
+/** How long shutdown waits for content hashes that are already being computed. */
+const CONTENT_HASH_SHUTDOWN_TIMEOUT_MS = 15_000
 
 if (process.argv.includes('--check')) {
   console.log('✅ Web app evaluated successfully!')
@@ -244,11 +248,22 @@ async function run() {
 
   console.log(`🚀 Server running at ${server.url}`)
 
-  const shutdown = () => {
+  let shuttingDown = false
+  const shutdown = async () => {
+    if (shuttingDown) return
+    shuttingDown = true
     console.log('\nShutting down gracefully...')
     assetService.stopCleanupJob()
     storageCatalogService.stopCatalogSync()
     server.stop(true)
+    // Let content hashes that are already being computed finish (bounded); queued ones are dropped and stay
+    // empty until `verify-catalog --deep --backfill-hashes`.
+    const { dropped, timedOut } = await contentHashQueue.shutdown(CONTENT_HASH_SHUTDOWN_TIMEOUT_MS)
+    if (dropped > 0 || timedOut) {
+      console.log(
+        `Content hashing stopped early: ${dropped} queued hashes dropped${timedOut ? ', in-flight hashes timed out' : ''}`,
+      )
+    }
     process.exit(0)
   }
 

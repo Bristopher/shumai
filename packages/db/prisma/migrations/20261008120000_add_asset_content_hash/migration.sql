@@ -1,4 +1,2 @@
--- SHA-256 (lowercase hex) of the stored original, recorded when an upload is confirmed and kept in the
--- storage catalog. Null for files uploaded before this existed, folders and symlinks. The catalog triggers on
--- "assets" already fire on any UPDATE, so recording a hash queues the asset for the catalog like any change.
-ALTER TABLE "assets" ADD COLUMN "content_hash" TEXT;
+ALTER TABLE "assets" ADD COLUMN IF NOT EXISTS "content_hash" TEXT;
+CREATE INDEX IF NOT EXISTS "assets_project_id_content_hash_idx" ON "assets"("project_id", "content_hash");
