@@ -202,6 +202,8 @@ export const systemFields: Prisma.MetadataFieldCreateInput[] = [
         displayTimezone: false,
         includeTime: true,
         timeFormat: 'twelve_hour',
+        // The camera's wall clock stored as UTC (utils/capture-time.ts), shown as stored.
+        wallClock: true,
       },
     },
   },

@@ -12,6 +12,7 @@ import sharp from 'sharp'
 import { ulid } from 'ulid'
 import { promisify } from 'util'
 import { mapConcurrent } from '../utils/async'
+import { videoCaptureTime } from '../utils/capture-time'
 import { isRawImage } from '../utils/raw'
 import { dataFormatNames } from './dataFormatNames'
 import { extractAndValidateRawPreview, EXIF_ORIENTATION_TO_ROTATION } from './raw-extract'
@@ -156,7 +157,10 @@ export interface MediaMetadata {
   frameRate: number
   totalFrames: number
   startTimecode?: string
-  /** Container creation time (QuickTime `creation_time`, UTC), as an ISO string. */
+  /**
+   * Date taken as an ISO string in the `capture_date` convention (camera wall clock as if UTC):
+   * from `com.apple.quicktime.creationdate` when present, else the UTC `creation_time`.
+   */
   creationTime?: string
   hasAudio: boolean
   videoCodec?: string
@@ -719,13 +723,13 @@ export class TranscodeService {
       totalFrames = Math.round(duration * fps)
     }
     const startTimecode = videoStream.tags?.timecode || info.format?.tags?.timecode
-    const createdTag = info.format?.tags?.creation_time || videoStream.tags?.creation_time
-    const created = createdTag ? new Date(createdTag) : null
-    // Some encoders write 1904-01-01 (a zero QuickTime timestamp) or 1970 when the clock is unset.
-    const creationTime =
-      created && !isNaN(created.getTime()) && created.getUTCFullYear() > 1990
-        ? created.toISOString()
-        : undefined
+    // The camera's wall clock when the container has a local-time tag, else the UTC creation_time.
+    const creationTime = videoCaptureTime({
+      localCreationDate:
+        info.format?.tags?.['com.apple.quicktime.creationdate'] ||
+        videoStream.tags?.['com.apple.quicktime.creationdate'],
+      creationTime: info.format?.tags?.creation_time || videoStream.tags?.creation_time,
+    })
 
     let videoBitRate: number | undefined
     if (videoStream.bit_rate && parseInt(videoStream.bit_rate, 10) > 0) {

@@ -15,10 +15,15 @@ import {
 } from './photo-exif'
 
 describe('photoExifFromTags', () => {
-  it('keeps the true instant when the camera recorded its UTC offset', () => {
+  it('keeps the wall clock when the camera recorded a UTC offset', () => {
     const taken = ExifDateTime.fromEXIF('2026:09:06 11:31:43.250-04:00')
+    expect(taken?.hasZone).toBe(true)
     expect(photoExifFromTags({ DateTimeOriginal: taken })?.capturedAt).toBe(
-      '2026-09-06T15:31:43.250Z',
+      '2026-09-06T11:31:43.250Z',
+    )
+    const late = ExifDateTime.fromEXIF('2026:09:06 23:30:00+02:00')
+    expect(photoExifFromTags({ DateTimeOriginal: late })?.capturedAt).toBe(
+      '2026-09-06T23:30:00.000Z',
     )
   })
 

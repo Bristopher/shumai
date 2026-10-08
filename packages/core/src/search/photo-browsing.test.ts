@@ -178,4 +178,25 @@ describe('SearchService — photo browsing (date taken sort, camera filter)', ()
       { value: 'FUJIFILM X-S20', count: 1 },
     ])
   })
+
+  it('limits cameras and lenses separately', async () => {
+    for (let i = 0; i < 310; i++) {
+      const a = await prisma.asset.create({
+        data: {
+          name: `c${i}.jpg`,
+          type: AssetType.file,
+          projectId,
+          parentId: rootId,
+          status: 'processed',
+        },
+      })
+      await prisma.assetMetadataValue.create({
+        data: { assetId: a.id, fieldKey: 'camera', stringValue: `Cam ${i}` },
+      })
+    }
+    const facets = await searchService.photoFacets(rootId)
+    expect(facets.camera).toHaveLength(300)
+    // The lenses are not crowded out by the long camera list.
+    expect(facets.lens.map((f) => f.value)).toContain('FUJINON 23mm')
+  })
 })

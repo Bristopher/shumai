@@ -72,6 +72,8 @@ export const photoFacetsRequestSchema = z.object({
   recursively: z.boolean().optional().default(false),
   operator: searchOperatorSchema.optional().default('AND'),
   conditions: z.array(searchConditionSchema).optional().default([]),
+  /** Count symlinked files too, as the listing does when it shows symlinks. */
+  showSymlink: z.boolean().optional(),
 })
 export type PhotoFacetsRequest = z.infer<typeof photoFacetsRequestSchema>
 

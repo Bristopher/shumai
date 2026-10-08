@@ -16,6 +16,9 @@ import { workflowService } from '@shumai/workflow-core'
 import { HTTPException } from 'hono/http-exception'
 import { CAPTURE_DATE_SQL, SqlQueryBuilder } from './sql-query-builder'
 
+/** Most values returned per facet (camera, lens), each limited on its own. */
+const PHOTO_FACET_LIMIT = 300
+
 export class SearchService {
   constructor(
     private readonly prismaClient: typeof prisma = prisma,
@@ -467,6 +470,7 @@ export class SearchService {
       recursively?: boolean
       operator?: 'AND' | 'OR'
       conditions?: SearchCondition[]
+      showSymlink?: boolean
     } = {},
   ): Promise<PhotoFacets> {
     const folderIds = options.recursively
@@ -478,28 +482,35 @@ export class SearchService {
       .from(Prisma.sql`assets a`)
       .addWhere(Prisma.sql`a.is_deleted = false`)
       .addWhere(Prisma.sql`a.parent_id = ANY(${folderIds})`)
-      .addWhere(Prisma.sql`a.type = ANY(${types}::"AssetType"[])`)
       .addSearchConditions(options.operator ?? 'AND', options.conditions ?? [])
-    const facetByKey = new Map<string, PhotoFacet>(
-      (Object.entries(PHOTO_FACETS) as [PhotoFacet, string][]).map(([facet, key]) => [key, facet]),
-    )
-    const rows = await this.prismaClient.$queryRaw<
-      Array<{ key: string; value: string; count: bigint }>
-    >(Prisma.sql`
-      SELECT v.field_key AS key, v.string_value AS value, count(*) AS count
-      FROM asset_metadata_values v
-      WHERE v.asset_id IN (${files.build()})
-        AND v.field_key = ANY(${[...facetByKey.keys()]}::text[])
-        AND v.string_value IS NOT NULL
-      GROUP BY 1, 2
-      ORDER BY 3 DESC, 2 ASC
-      LIMIT 300
-    `)
-    const facets: PhotoFacets = { camera: [], lens: [] }
-    for (const r of rows) {
-      const facet = facetByKey.get(r.key)
-      if (facet) facets[facet].push({ value: r.value, count: Number(r.count) })
+    // The same set the listing shows: with showSymlink, symlinks to such files count too.
+    if (options.showSymlink) {
+      files.addWhere(Prisma.sql`
+        (a.type = ANY(${types}::"AssetType"[]) OR (a.type = 'symlink' AND a.target_id IN (SELECT id FROM assets WHERE type = ANY(${types}::"AssetType"[]))))
+      `)
+    } else {
+      files.addWhere(Prisma.sql`a.type = ANY(${types}::"AssetType"[])`)
     }
+    // One query per facet so a long camera list cannot crowd out the lenses.
+    const filesSql = files.build()
+    const facets: PhotoFacets = { camera: [], lens: [] }
+    await Promise.all(
+      (Object.entries(PHOTO_FACETS) as [PhotoFacet, string][]).map(async ([facet, key]) => {
+        const rows = await this.prismaClient.$queryRaw<Array<{ value: string; count: bigint }>>(
+          Prisma.sql`
+            SELECT v.string_value AS value, count(*) AS count
+            FROM asset_metadata_values v
+            WHERE v.asset_id IN (${filesSql})
+              AND v.field_key = ${key}
+              AND v.string_value IS NOT NULL
+            GROUP BY 1
+            ORDER BY 2 DESC, 1 ASC
+            LIMIT ${PHOTO_FACET_LIMIT}
+          `,
+        )
+        facets[facet] = rows.map((r) => ({ value: r.value, count: Number(r.count) }))
+      }),
+    )
     return facets
   }
 }

@@ -5,15 +5,16 @@
 import { exiftool, ExifDateTime, type Tags } from 'exiftool-vendored'
 import { logger } from '../logger'
 import { withTimeout } from '../transcode/raw-extract'
+import { wallClockToIso } from './capture-time'
 
 export interface PhotoExif {
   make?: string
   model?: string
   lensModel?: string
   /**
-   * When the photo was taken, as an ISO string. When the camera recorded its UTC offset
-   * (OffsetTimeOriginal) this is the true instant; otherwise the camera's wall-clock time is
-   * written as if it were UTC.
+   * When the photo was taken, as the camera's wall-clock time written as if it were UTC (see
+   * `capture-time.ts`). An EXIF UTC offset (OffsetTimeOriginal) is deliberately not applied, so
+   * a 23:30 shot stays 23:30 whatever zone it was taken in or is viewed from.
    */
   capturedAt?: string
 }
@@ -29,21 +30,16 @@ function nonBlank(value: unknown): string | undefined {
 function dateToIso(value: unknown): string | undefined {
   if (value instanceof ExifDateTime) {
     if (!value.isValid || value.year < 1970) return undefined
-    // A zone-less value is the camera's wall-clock time: keep the digits, label them UTC.
-    const date = value.hasZone
-      ? value.toDate()
-      : new Date(
-          Date.UTC(
-            value.year,
-            value.month - 1,
-            value.day,
-            value.hour,
-            value.minute,
-            value.second,
-            value.millisecond ?? 0,
-          ),
-        )
-    return isNaN(date.getTime()) ? undefined : date.toISOString()
+    // The fields are the wall clock as written, with or without an offset; keep the digits.
+    return wallClockToIso(
+      value.year,
+      value.month,
+      value.day,
+      value.hour,
+      value.minute,
+      value.second,
+      value.millisecond ?? 0,
+    )
   }
   return undefined
 }

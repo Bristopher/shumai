@@ -1,7 +1,7 @@
 import type { AssetInfo } from '@shumai/dtos'
 
 export interface DayGroup {
-  /** Local calendar day ("2026-09-06"), or "undated". */
+  /** Calendar day at the camera ("2026-09-06"), or "undated". */
   day: string
   /** Unique across the list (a day split into two runs gets a suffix). */
   key: string
@@ -17,20 +17,24 @@ export function captureDateOf(file: Pick<AssetInfo, 'fieldValues'>): Date | null
   return isNaN(d.getTime()) ? null : d
 }
 
-function localDayKey(d: Date): string {
+/**
+ * The calendar day of a capture date. The value is the camera's wall clock stored as UTC, so the
+ * day is read in UTC and never depends on the viewer's time zone.
+ */
+export function wallClockDayKey(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`
 }
 
 /**
- * Split files already sorted by date taken into runs of the same local day, keeping their order
+ * Split files already sorted by date taken into runs of the same camera day, keeping their order
  * (so a group's items are contiguous in `files`). Files without a date form "undated" runs.
  */
 export function groupFilesByDay(files: AssetInfo[], undatedLabel: string): DayGroup[] {
   const groups: DayGroup[] = []
   for (const file of files) {
     const d = captureDateOf(file)
-    const day = d ? localDayKey(d) : 'undated'
+    const day = d ? wallClockDayKey(d) : 'undated'
     const last = groups[groups.length - 1]
     if (last && last.day === day) {
       last.items.push(file)
@@ -45,6 +49,7 @@ export function groupFilesByDay(files: AssetInfo[], undatedLabel: string): DayGr
             year: 'numeric',
             month: 'short',
             day: 'numeric',
+            timeZone: 'UTC',
           })
         : undatedLabel,
       items: [file],
