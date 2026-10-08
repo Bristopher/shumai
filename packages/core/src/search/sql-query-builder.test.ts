@@ -31,6 +31,36 @@ describe('SqlQueryBuilder', () => {
     expect(query.values).toEqual(['project-123', vectorJson, 10, 20])
   })
 
+  describe('stackRawJpeg', () => {
+    it('leaves the query alone when stacking is off', () => {
+      const query = new SqlQueryBuilder()
+        .select(Prisma.sql`a.id`)
+        .from(Prisma.sql`assets a`)
+        .addWhere(Prisma.sql`a.is_deleted = false`)
+        .stackRawJpeg(false)
+        .build()
+      expect(query.text).toBe('SELECT a.id FROM assets a WHERE a.is_deleted = false')
+    })
+
+    it('wraps the filtered rows and keeps only the cover of each shot', () => {
+      const query = new SqlQueryBuilder()
+        .select(Prisma.sql`a.id`)
+        .from(Prisma.sql`assets a`)
+        .addWhere(Prisma.sql`a.parent_id = ${'folder-1'}`)
+        .stackRawJpeg()
+        .orderBy(Prisma.sql`a.name ASC`)
+        .build()
+      expect(query.text).toMatch(/FROM assets a WHERE a\.parent_id = \$\d/)
+      expect(query.values).toContain('folder-1')
+      expect(query.text).toContain('PARTITION BY s.parent_id, s.stack_key')
+      expect(query.text).toContain('a.stack_rn = 1 ORDER BY a.name ASC')
+      // The RAW and JPEG/HEIF extension lists are bound as parameters, RAW list first.
+      const lists = query.values.filter((value): value is string[] => Array.isArray(value))
+      expect(lists[0]).toContain('raf')
+      expect(lists[1]).toEqual(['jpg', 'jpeg', 'heic', 'heif', 'hif'])
+    })
+  })
+
   it('throws an error if FROM clause is missing', () => {
     const builder = new SqlQueryBuilder().select(Prisma.sql`id`)
     expect(() => builder.build()).toThrow('FROM clause is required')

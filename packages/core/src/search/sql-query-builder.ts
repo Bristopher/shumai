@@ -1,5 +1,11 @@
 import { Prisma } from '@shumai/db'
 import { SearchCondition } from '@shumai/dtos'
+import { STACK_PREVIEW_EXTENSIONS, STACK_RAW_EXTENSIONS } from '@shumai/core/src/utils/photo-stack'
+
+// The backslashes in these SQL regexes are doubled for the template literal. A leading dot is not
+// an extension (".jpg" has none), matching `stackExtension()` in utils/photo-stack.
+const STACK_EXTENSION_SQL = Prisma.sql`lower(substring(a.name from '^.+\\.([^.]+)$'))`
+const STACK_BASE_NAME_SQL = Prisma.sql`lower(regexp_replace(a.name, '^(.+)\\.[^.]+$', '\\1'))`
 
 export class SqlQueryBuilder {
   private selectSql: Prisma.Sql = Prisma.sql`*`
@@ -8,6 +14,7 @@ export class SqlQueryBuilder {
   private orderSql: Prisma.Sql | null = null
   private limitCount: number | null = null
   private offsetCount: number | null = null
+  private stackedRawJpeg = false
 
   select(fields: Prisma.Sql): this {
     this.selectSql = fields
@@ -36,6 +43,19 @@ export class SqlQueryBuilder {
 
   offset(n: number): this {
     this.offsetCount = n
+    return this
+  }
+
+  /**
+   * Collapse each RAW + JPEG shot (same folder, same base name ignoring case, differing only by a
+   * camera RAW vs a JPEG/HEIF extension) to its cover, the first JPEG/HEIF photo. A shot needs at
+   * least one of each; lone files and every other file type pass through untouched. The outer
+   * query still aliases rows as `a` and adds `a.stack_key`, `a.stack_count` (files in the stack)
+   * and `a.stack_size` (their total bytes), so select, order and count clauses work unchanged.
+   * Mirrors `groupPhotoStacks()` in utils/photo-stack.
+   */
+  stackRawJpeg(enabled = true): this {
+    this.stackedRawJpeg = enabled
     return this
   }
 
@@ -70,16 +90,14 @@ export class SqlQueryBuilder {
       throw new Error('FROM clause is required in SqlQueryBuilder')
     }
 
-    const queryParts: Prisma.Sql[] = [
-      Prisma.sql`SELECT`,
-      this.selectSql,
-      Prisma.sql`FROM`,
-      this.fromSql,
-    ]
+    const queryParts: Prisma.Sql[] = [Prisma.sql`SELECT`, this.selectSql, Prisma.sql`FROM`]
 
-    if (this.wheres.length > 0) {
-      queryParts.push(Prisma.sql`WHERE`)
-      queryParts.push(Prisma.join(this.wheres, ' AND '))
+    const where =
+      this.wheres.length > 0 ? Prisma.sql`WHERE ${Prisma.join(this.wheres, ' AND ')}` : Prisma.empty
+    if (this.stackedRawJpeg) {
+      queryParts.push(this.buildStackedFrom(where))
+    } else {
+      queryParts.push(this.fromSql, where)
     }
 
     if (this.orderSql) {
@@ -96,6 +114,36 @@ export class SqlQueryBuilder {
     }
 
     return Prisma.join(queryParts, ' ')
+  }
+
+  private buildStackedFrom(where: Prisma.Sql): Prisma.Sql {
+    const rawExtensions = [...STACK_RAW_EXTENSIONS]
+    const previewExtensions = [...STACK_PREVIEW_EXTENSIONS]
+    return Prisma.sql`(
+      SELECT s.*,
+        CASE WHEN s.stack_on THEN row_number() OVER (
+          PARTITION BY s.parent_id, s.stack_key, s.stack_on
+          ORDER BY s.stack_rank, s.name, s.id
+        ) ELSE 1 END AS stack_rn,
+        CASE WHEN s.stack_on THEN count(*) FILTER (WHERE s.stack_is_raw OR s.stack_is_preview)
+          OVER (PARTITION BY s.parent_id, s.stack_key) ELSE 1 END AS stack_count,
+        CASE WHEN s.stack_on THEN sum(COALESCE(s.size_byte, 0)) FILTER (WHERE s.stack_is_raw OR s.stack_is_preview)
+          OVER (PARTITION BY s.parent_id, s.stack_key) ELSE COALESCE(s.size_byte, 0) END AS stack_size
+      FROM (
+        SELECT g.*,
+          (g.stack_is_raw OR g.stack_is_preview)
+            AND bool_or(g.stack_is_raw) OVER (PARTITION BY g.parent_id, g.stack_key)
+            AND bool_or(g.stack_is_preview) OVER (PARTITION BY g.parent_id, g.stack_key) AS stack_on
+        FROM (
+          SELECT a.*,
+            ${STACK_BASE_NAME_SQL} AS stack_key,
+            COALESCE(${STACK_EXTENSION_SQL} = ANY(${rawExtensions}::text[]), false) AS stack_is_raw,
+            COALESCE(${STACK_EXTENSION_SQL} = ANY(${previewExtensions}::text[]), false) AS stack_is_preview,
+            COALESCE(array_position(${previewExtensions}::text[], ${STACK_EXTENSION_SQL}), 100) AS stack_rank
+          FROM ${this.fromSql} ${where}
+        ) g
+      ) s
+    ) a WHERE a.stack_rn = 1`
   }
 
   private isDate(value: unknown): boolean {
