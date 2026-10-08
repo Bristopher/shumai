@@ -97,6 +97,8 @@ export const localUploadQuerySchema = z.object({
   // Present only for local multipart operations (part upload, complete, list, abort).
   uploadId: z.string().optional(),
   partNumber: z.coerce.number().int().optional(),
+  // Unix-seconds expiry, part of the signed payload. Absent only on legacy whole-object PUT URLs.
+  exp: z.coerce.number().int().optional(),
 })
 export type LocalUploadQuery = z.infer<typeof localUploadQuerySchema>
 

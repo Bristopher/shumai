@@ -32,21 +32,90 @@ export interface LocalMultipartParams {
   partNumber?: number
 }
 
-function localSignaturePayload(bucket: string, key: string, mp?: LocalMultipartParams): string {
-  return mp
-    ? `${bucket}/${key}?${mp.method}:${mp.uploadId ?? ''}:${mp.partNumber ?? ''}`
-    : `${bucket}/${key}`
+/** Lifetime of a signed local URL; follows the same setting S3 presigned URLs use (hours, default 5). */
+export function localUrlLifetimeSeconds(): number {
+  const hours = parseInt(process.env.PRESIGNED_URL_EXPIRES_IN || '5', 10)
+  return (Number.isFinite(hours) && hours > 0 ? hours : 5) * 3600
 }
 
-export function signLocalUrl(bucket: string, key: string, mp?: LocalMultipartParams): string {
-  const secret = process.env.BETTER_AUTH_SECRET || 'shumai-local-storage-secret'
-  const hmac = crypto.createHmac('sha256', secret)
-  hmac.update(localSignaturePayload(bucket, key, mp))
-  const signature = hmac.digest('hex')
+function localSecret(): string {
+  return process.env.BETTER_AUTH_SECRET || 'shumai-local-storage-secret'
+}
+
+/**
+ * The signed fields as a JSON array, so no field value can be shifted into a neighbour (a plain
+ * string join is ambiguous when keys or ids contain the separator).
+ */
+function localSignaturePayload(
+  bucket: string,
+  key: string,
+  mp: LocalMultipartParams | undefined,
+  exp: number | undefined,
+): string {
+  return JSON.stringify([
+    bucket,
+    key,
+    mp?.method ?? 'PUT',
+    mp?.uploadId ?? null,
+    mp?.partNumber ?? null,
+    exp ?? null,
+  ])
+}
+
+function hmacHex(payload: string): string {
+  return crypto.createHmac('sha256', localSecret()).update(payload).digest('hex')
+}
+
+function signaturesMatch(signature: string, expected: string): boolean {
+  try {
+    const given = Buffer.from(signature, 'hex')
+    const want = Buffer.from(expected, 'hex')
+    return given.length === want.length && crypto.timingSafeEqual(given, want)
+  } catch {
+    return false
+  }
+}
+
+/** Builds a signed, expiring local upload URL. `exp` (unix seconds) is part of the signed payload. */
+export function signLocalUrl(
+  bucket: string,
+  key: string,
+  mp?: LocalMultipartParams,
+  expiresInSeconds: number = localUrlLifetimeSeconds(),
+  nowMs: number = Date.now(),
+): string {
+  const exp = Math.floor(nowMs / 1000) + expiresInSeconds
+  const signature = hmacHex(localSignaturePayload(bucket, key, mp, exp))
   let url = `/api/upload/local?bucket=${encodeURIComponent(bucket)}&key=${encodeURIComponent(key)}`
   if (mp?.uploadId) url += `&uploadId=${encodeURIComponent(mp.uploadId)}`
   if (mp?.partNumber != null) url += `&partNumber=${mp.partNumber}`
-  return `${url}&Signature=${signature}`
+  return `${url}&exp=${exp}&Signature=${signature}`
+}
+
+export type LocalUrlCheck = 'ok' | 'invalid' | 'expired'
+
+/**
+ * Checks a signed local URL. A URL without `exp` is only accepted for the legacy whole-object PUT
+ * (signature over `bucket/key`), which older servers handed out; this compatibility path can be
+ * dropped one release after expiring URLs ship. Multipart URLs must always carry an expiry.
+ */
+export function checkLocalUrl(
+  bucket: string,
+  key: string,
+  signature: string,
+  mp?: LocalMultipartParams,
+  exp?: number,
+  nowMs: number = Date.now(),
+): LocalUrlCheck {
+  if (exp === undefined) {
+    if (mp) return 'invalid'
+    return signaturesMatch(signature, hmacHex(`${bucket}/${key}`)) ? 'ok' : 'invalid'
+  }
+  if (!Number.isSafeInteger(exp)) return 'invalid'
+  if (!signaturesMatch(signature, hmacHex(localSignaturePayload(bucket, key, mp, exp)))) {
+    return 'invalid'
+  }
+  return exp * 1000 < nowMs ? 'expired' : 'ok'
 }
 
 export function verifyLocalUrlSignature(
@@ -54,16 +123,10 @@ export function verifyLocalUrlSignature(
   key: string,
   signature: string,
   mp?: LocalMultipartParams,
+  exp?: number,
+  nowMs: number = Date.now(),
 ): boolean {
-  const secret = process.env.BETTER_AUTH_SECRET || 'shumai-local-storage-secret'
-  const hmac = crypto.createHmac('sha256', secret)
-  hmac.update(localSignaturePayload(bucket, key, mp))
-  const expected = hmac.digest('hex')
-  try {
-    return crypto.timingSafeEqual(Buffer.from(signature, 'hex'), Buffer.from(expected, 'hex'))
-  } catch {
-    return false
-  }
+  return checkLocalUrl(bucket, key, signature, mp, exp, nowMs) === 'ok'
 }
 
 /**
@@ -101,7 +164,8 @@ export function buildContentDisposition(filename?: string | null): string {
 /** Error with an S3-style code, thrown by the local multipart implementation. */
 export class LocalMultipartError extends Error {
   constructor(
-    public readonly code: 'InvalidArgument' | 'NoSuchUpload' | 'InvalidPart',
+    public readonly code:
+      'InvalidArgument' | 'NoSuchUpload' | 'InvalidPart' | 'EntityTooLarge' | 'OperationAborted',
     message: string,
   ) {
     super(message)
@@ -112,6 +176,20 @@ export class LocalMultipartError extends Error {
 const LOCAL_MULTIPART_DIR = '.multipart'
 const MAX_PART_NUMBER = 10000
 const UPLOAD_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
+const S3_MAX_PART_SIZE = 5 * 1024 * 1024 * 1024
+/** Orphaned multipart uploads (no activity for this long) are swept. */
+const MULTIPART_STALE_MS = 24 * 3600 * 1000
+const MULTIPART_SWEEP_INTERVAL_MS = 3600 * 1000
+/** A complete lock older than this is assumed to belong to a crashed process. */
+const COMPLETE_LOCK_STALE_MS = 3600 * 1000
+
+/** Largest accepted part: S3's 5 GiB limit, or MAX_REQUEST_BODY_SIZE when that is lower. */
+export function maxLocalPartSize(): number {
+  const configured = parseInt(process.env.MAX_REQUEST_BODY_SIZE || '', 10)
+  return Number.isFinite(configured) && configured > 0
+    ? Math.min(S3_MAX_PART_SIZE, configured)
+    : S3_MAX_PART_SIZE
+}
 
 function assertValidUploadId(uploadId: string): void {
   if (!UPLOAD_ID_PATTERN.test(uploadId)) {
@@ -542,7 +620,8 @@ export class LocalStorageService implements S3Service {
 
   private getFilePath(bucket: string, key: string): string {
     const filePath = path.join(this.basePath, bucket, key)
-    if (!filePath.startsWith(this.basePath)) {
+    const rel = path.relative(this.basePath, filePath)
+    if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
       throw new Error(`Invalid path: potential path traversal detected`)
     }
     return filePath
@@ -576,22 +655,50 @@ export class LocalStorageService implements S3Service {
     await this.writeBody(filePath, body)
   }
 
+  /** Writes a body to disk. With `maxBytes`, a body that grows past the cap is aborted and removed. */
   private async writeBody(
     filePath: string,
     body: Buffer | Uint8Array | ArrayBuffer | string | ReadableStream | NodeJS.ReadableStream,
+    maxBytes?: number,
   ): Promise<void> {
+    const tooLarge = () =>
+      new LocalMultipartError(
+        'EntityTooLarge',
+        `Part exceeds the maximum size of ${maxBytes} bytes`,
+      )
     if (
       body &&
       typeof body === 'object' &&
       ('pipe' in body || 'getReader' in body || Symbol.asyncIterator in body)
     ) {
       try {
-        await pipeline(body as unknown as NodeJS.ReadableStream, fs.createWriteStream(filePath))
+        const source = body as unknown as NodeJS.ReadableStream
+        if (maxBytes === undefined) {
+          await pipeline(source, fs.createWriteStream(filePath))
+        } else {
+          let received = 0
+          await pipeline(
+            source,
+            async function* (chunks: AsyncIterable<Uint8Array>) {
+              for await (const chunk of chunks) {
+                received += chunk.byteLength
+                if (received > maxBytes) throw tooLarge()
+                yield chunk
+              }
+            },
+            fs.createWriteStream(filePath),
+          )
+        }
       } catch (err) {
         await fs.promises.unlink(filePath).catch(() => {})
         throw err
       }
     } else {
+      if (maxBytes !== undefined) {
+        const size =
+          typeof body === 'string' ? Buffer.byteLength(body) : (body as Uint8Array).byteLength
+        if (size > maxBytes) throw tooLarge()
+      }
       await Bun.write(filePath, body)
     }
   }
@@ -822,6 +929,7 @@ export class LocalStorageService implements S3Service {
     uploadId: string,
     partNumber: number,
     body: Parameters<S3Service['putObject']>[2],
+    maxBytes: number = maxLocalPartSize(),
   ): Promise<LocalPartInfo> {
     assertValidPartNumber(partNumber)
     const dir = this.getUploadDir(bucket, key, uploadId)
@@ -831,7 +939,7 @@ export class LocalStorageService implements S3Service {
     const partPath = path.join(dir, `part-${partNumber}`)
     const tmpPath = `${partPath}.${ulid()}.tmp`
     try {
-      await this.writeBody(tmpPath, body)
+      await this.writeBody(tmpPath, body, maxBytes)
       await fs.promises.rename(tmpPath, partPath)
     } catch (err) {
       await fs.promises.unlink(tmpPath).catch(() => {})
@@ -862,20 +970,112 @@ export class LocalStorageService implements S3Service {
   /**
    * Concatenates the listed parts, in the given (ascending) order, into the final object. The
    * result is built in a temp file and renamed into place, so readers never see a partial object.
+   *
+   * Completion is serialized per upload with a lock file and is idempotent: once finished, a
+   * retried or concurrent complete returns the original result as long as the final object is still
+   * the size recorded in the completion marker.
    */
   async completeMultipartUpload(
     bucket: string,
     key: string,
     uploadId: string,
     parts: { partNumber: number; etag?: string }[],
+    lockWaitMs: number = 5 * 60 * 1000,
   ): Promise<{ etag: string; size: number }> {
     if (parts.length === 0) {
       throw new LocalMultipartError('InvalidPart', 'At least one part is required')
     }
     const dir = this.getUploadDir(bucket, key, uploadId)
-    const stored = new Map(
-      (await this.listParts(bucket, key, uploadId)).map((p) => [p.partNumber, p]),
-    )
+    const release = await this.acquireCompleteLock(`${dir}.lock`, lockWaitMs)
+    try {
+      return await this.completeLocked(bucket, key, uploadId, parts, dir)
+    } finally {
+      await release()
+    }
+  }
+
+  private async acquireCompleteLock(
+    lockPath: string,
+    waitMs: number,
+  ): Promise<() => Promise<void>> {
+    const deadline = Date.now() + waitMs
+    for (;;) {
+      try {
+        await (await fs.promises.open(lockPath, 'wx')).close()
+        return async () => {
+          await fs.promises.rm(lockPath, { force: true })
+        }
+      } catch (e: unknown) {
+        const code = (e as NodeJS.ErrnoException).code
+        if (code === 'ENOENT') {
+          throw new LocalMultipartError('NoSuchUpload', 'The specified upload does not exist')
+        }
+        if (code !== 'EEXIST' && code !== 'EPERM' && code !== 'EBUSY') throw e
+      }
+      const stats = await fs.promises.stat(lockPath).catch(() => null)
+      if (stats && Date.now() - stats.mtimeMs > COMPLETE_LOCK_STALE_MS) {
+        await fs.promises.rm(lockPath, { force: true }) // left behind by a crashed process
+        continue
+      }
+      if (Date.now() >= deadline) {
+        throw new LocalMultipartError(
+          'OperationAborted',
+          'Another complete request for this upload is still running',
+        )
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+  }
+
+  /** The recorded result of a finished upload, if its final object is still intact. */
+  private async readCompletion(
+    donePath: string,
+    finalPath: string,
+    parts: { partNumber: number; etag?: string }[],
+  ): Promise<{ etag: string; size: number } | null> {
+    try {
+      const marker = JSON.parse(await fs.promises.readFile(donePath, 'utf8')) as {
+        etag: string
+        size: number
+        parts: { partNumber: number; etag: string }[]
+      }
+      const unquote = (etag: string) => etag.replace(/^"|"$/g, '')
+      const sameParts =
+        marker.parts.length === parts.length &&
+        marker.parts.every((m, i) => {
+          const asked = parts[i]
+          return (
+            asked.partNumber === m.partNumber &&
+            (!asked.etag || unquote(asked.etag) === unquote(m.etag))
+          )
+        })
+      if (!sameParts) return null
+      const { size } = await fs.promises.stat(finalPath)
+      return size === marker.size ? { etag: marker.etag, size: marker.size } : null
+    } catch {
+      return null
+    }
+  }
+
+  private async completeLocked(
+    bucket: string,
+    key: string,
+    uploadId: string,
+    parts: { partNumber: number; etag?: string }[],
+    dir: string,
+  ): Promise<{ etag: string; size: number }> {
+    const finalPath = this.getFilePath(bucket, key)
+    let listed: LocalPartInfo[]
+    try {
+      listed = await this.listParts(bucket, key, uploadId)
+    } catch (e) {
+      if (e instanceof LocalMultipartError && e.code === 'NoSuchUpload') {
+        const done = await this.readCompletion(`${dir}.done`, finalPath, parts)
+        if (done) return done
+      }
+      throw e
+    }
+    const stored = new Map(listed.map((p) => [p.partNumber, p]))
     const unquote = (etag: string) => etag.replace(/^"|"$/g, '')
     let previous = 0
     let expectedSize = 0
@@ -895,7 +1095,6 @@ export class LocalStorageService implements S3Service {
       expectedSize += info.size
     }
 
-    const finalPath = this.getFilePath(bucket, key)
     await fs.promises.mkdir(path.dirname(finalPath), { recursive: true })
     const assembledPath = path.join(dir, `assembled.${ulid()}.tmp`)
     const handle = await fs.promises.open(assembledPath, 'w')
@@ -916,11 +1115,18 @@ export class LocalStorageService implements S3Service {
       await fs.promises.unlink(assembledPath).catch(() => {})
       throw err
     }
-    await this.removeUploadDir(dir)
     const etag = `"${crypto
       .createHash('md5')
       .update(parts.map((p) => stored.get(p.partNumber)!.etag).join(''))
       .digest('hex')}-${parts.length}"`
+    // Recorded before the parts go away so a retried complete can still answer.
+    const marker = {
+      etag,
+      size: expectedSize,
+      parts: parts.map((p) => ({ partNumber: p.partNumber, etag: stored.get(p.partNumber)!.etag })),
+    }
+    await fs.promises.writeFile(`${dir}.done`, JSON.stringify(marker)).catch(() => {})
+    await this.removeUploadDir(dir)
     return { etag, size: expectedSize }
   }
 
@@ -932,11 +1138,73 @@ export class LocalStorageService implements S3Service {
     await fs.promises.rmdir(path.dirname(dir)).catch(() => {}) // drop the key scope dir once empty
   }
 
+  /** Discards the upload's staged parts. The final object, if it exists, is never touched. */
   async abortMultipartUpload(bucket: string, key: string, uploadId: string): Promise<void> {
     if (UPLOAD_ID_PATTERN.test(uploadId)) {
       await this.removeUploadDir(this.getUploadDir(bucket, key, uploadId))
     }
-    await this.deleteObject(bucket, key)
+  }
+
+  /**
+   * Removes staged uploads (and completion markers / stale locks) under `.multipart` whose newest
+   * file is older than `maxAgeMs`. Only the staging tree is touched, never a stored object.
+   */
+  async sweepStaleMultipartUploads(
+    maxAgeMs: number = MULTIPART_STALE_MS,
+    nowMs: number = Date.now(),
+  ): Promise<number> {
+    const root = path.join(this.basePath, LOCAL_MULTIPART_DIR)
+    const newestMtime = async (entry: string): Promise<number | null> => {
+      try {
+        const stats = await fs.promises.stat(entry)
+        let newest = stats.mtimeMs
+        if (stats.isDirectory()) {
+          for (const name of await fs.promises.readdir(entry)) {
+            const child = await fs.promises.stat(path.join(entry, name)).catch(() => null)
+            if (child) newest = Math.max(newest, child.mtimeMs)
+          }
+        }
+        return newest
+      } catch {
+        return null
+      }
+    }
+    let scopes: string[]
+    try {
+      scopes = await fs.promises.readdir(root)
+    } catch {
+      return 0
+    }
+    let removed = 0
+    for (const scope of scopes) {
+      if (!/^[0-9a-f]{32}$/.test(scope)) continue
+      const scopeDir = path.join(root, scope)
+      const entries = await fs.promises.readdir(scopeDir).catch(() => [] as string[])
+      for (const name of entries) {
+        const entry = path.join(scopeDir, name)
+        const newest = await newestMtime(entry)
+        if (newest === null || nowMs - newest < maxAgeMs) continue
+        await fs.promises.rm(entry, { recursive: true, force: true }).catch(() => {})
+        removed++
+      }
+      await fs.promises.rmdir(scopeDir).catch(() => {})
+    }
+    return removed
+  }
+
+  /** Starts the low-frequency orphan sweep; returns a function that stops it. */
+  startMultipartSweep(
+    intervalMs: number = MULTIPART_SWEEP_INTERVAL_MS,
+    maxAgeMs: number = MULTIPART_STALE_MS,
+  ): () => void {
+    const run = () =>
+      this.sweepStaleMultipartUploads(maxAgeMs).catch((err) => {
+        console.warn('Local multipart sweep failed:', err)
+      })
+    void run()
+    const timer = setInterval(run, intervalMs)
+    timer.unref?.()
+    return () => clearInterval(timer)
   }
 
   async resolveInput(bucket: string, key: string): Promise<string> {

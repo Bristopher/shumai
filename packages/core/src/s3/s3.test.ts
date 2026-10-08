@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as crypto from 'crypto'
 import * as os from 'os'
 import { Readable } from 'stream'
 import * as fs from 'fs'
@@ -14,6 +15,9 @@ import {
 } from '@aws-sdk/client-s3'
 import {
   buildContentDisposition,
+  checkLocalUrl,
+  localUrlLifetimeSeconds,
+  maxLocalPartSize,
   LocalStorageService,
   S3StorageService,
   signLocalUrl,
@@ -653,7 +657,8 @@ describe('S3Service implementations', () => {
       expect(done.size).toBe(9)
       expect(readFinal('dir/file.bin').toString()).toBe('AAAABBCCC')
       expect(await local.getObjectSize('bkt', 'dir/file.bin')).toBe(9)
-      expect(partFiles()).toEqual([])
+      // Only the small completion marker (for idempotent retries) outlives the parts.
+      expect(partFiles().filter((f) => /part-|.tmp$|.lock$/.test(String(f)))).toEqual([])
     })
 
     it('accepts streamed part bodies and replaces a retried part', async () => {
@@ -687,13 +692,124 @@ describe('S3Service implementations', () => {
       expect(fs.existsSync(path.join(base, 'bkt', 'k'))).toBe(false)
     })
 
-    it('abort removes the part files and any partial object', async () => {
+    it('abort removes only the staged parts and never the final object', async () => {
+      await local.putObject('bkt', 'k', Buffer.from('existing object'), 15)
       const id = await local.createMultipartUpload('bkt', 'k')
       await local.uploadPart('bkt', 'k', id, 1, Buffer.from('a'))
       expect(partFiles().length).toBeGreaterThan(0)
       await local.abortMultipartUpload('bkt', 'k', id)
       expect(partFiles()).toEqual([])
       await expect(local.listParts('bkt', 'k', id)).rejects.toThrow(/does not exist/)
+      expect(readFinal('k').toString()).toBe('existing object')
+    })
+
+    it('rejects a part larger than the cap, for buffers and streams, leaving nothing behind', async () => {
+      const id = await local.createMultipartUpload('bkt', 'k')
+      await expect(
+        local.uploadPart('bkt', 'k', id, 1, Buffer.from('0123456789'), 5),
+      ).rejects.toMatchObject({ code: 'EntityTooLarge' })
+      await expect(
+        local.uploadPart(
+          'bkt',
+          'k',
+          id,
+          2,
+          Readable.from([Buffer.from('012'), Buffer.from('345')]),
+          5,
+        ),
+      ).rejects.toMatchObject({ code: 'EntityTooLarge' })
+      expect(await local.listParts('bkt', 'k', id)).toEqual([])
+      const entries = fs.readdirSync(path.join(base, '.multipart'), { recursive: true })
+      expect(entries.filter((e) => String(e).endsWith('.tmp'))).toEqual([])
+      const ok = await local.uploadPart('bkt', 'k', id, 3, Buffer.from('12345'), 5)
+      expect(ok.size).toBe(5)
+    })
+
+    it('caps parts at the lower of 5 GiB and MAX_REQUEST_BODY_SIZE', () => {
+      const saved = process.env.MAX_REQUEST_BODY_SIZE
+      try {
+        delete process.env.MAX_REQUEST_BODY_SIZE
+        expect(maxLocalPartSize()).toBe(5 * 1024 ** 3)
+        process.env.MAX_REQUEST_BODY_SIZE = '1000'
+        expect(maxLocalPartSize()).toBe(1000)
+        process.env.MAX_REQUEST_BODY_SIZE = String(20 * 1024 ** 3)
+        expect(maxLocalPartSize()).toBe(5 * 1024 ** 3)
+      } finally {
+        if (saved === undefined) delete process.env.MAX_REQUEST_BODY_SIZE
+        else process.env.MAX_REQUEST_BODY_SIZE = saved
+      }
+    })
+
+    it('completes idempotently: a retried or concurrent complete returns the same result', async () => {
+      const id = await local.createMultipartUpload('bkt', 'k')
+      await local.uploadPart('bkt', 'k', id, 1, Buffer.from('hello '))
+      await local.uploadPart('bkt', 'k', id, 2, Buffer.from('world'))
+      const parts = [{ partNumber: 1 }, { partNumber: 2 }]
+      const [a, b] = await Promise.all([
+        local.completeMultipartUpload('bkt', 'k', id, parts),
+        local.completeMultipartUpload('bkt', 'k', id, parts),
+      ])
+      expect(b).toEqual(a)
+      expect(a.etag).toMatch(/^"[0-9a-f]{32}-2"$/)
+      const retry = await local.completeMultipartUpload('bkt', 'k', id, parts)
+      expect(retry).toEqual(a)
+      expect(readFinal('k').toString()).toBe('hello world')
+    })
+
+    it('does not treat a retried complete as success when the object changed or parts differ', async () => {
+      const id = await local.createMultipartUpload('bkt', 'k')
+      await local.uploadPart('bkt', 'k', id, 1, Buffer.from('abc'))
+      await local.completeMultipartUpload('bkt', 'k', id, [{ partNumber: 1 }])
+      await expect(
+        local.completeMultipartUpload('bkt', 'k', id, [{ partNumber: 1 }, { partNumber: 2 }]),
+      ).rejects.toMatchObject({ code: 'NoSuchUpload' })
+      await local.putObject('bkt', 'k', Buffer.from('replaced with other size'), 24)
+      await expect(
+        local.completeMultipartUpload('bkt', 'k', id, [{ partNumber: 1 }]),
+      ).rejects.toMatchObject({ code: 'NoSuchUpload' })
+    })
+
+    it('fails a complete that cannot get the lock in time, and steals a stale lock', async () => {
+      const id = await local.createMultipartUpload('bkt', 'k')
+      await local.uploadPart('bkt', 'k', id, 1, Buffer.from('abc'))
+      const scope = fs.readdirSync(path.join(base, '.multipart'))[0]
+      const lock = path.join(base, '.multipart', scope, `${id}.lock`)
+      fs.writeFileSync(lock, '')
+      await expect(
+        local.completeMultipartUpload('bkt', 'k', id, [{ partNumber: 1 }], 120),
+      ).rejects.toMatchObject({ code: 'OperationAborted' })
+      const old = new Date(Date.now() - 2 * 3600 * 1000)
+      fs.utimesSync(lock, old, old)
+      const done = await local.completeMultipartUpload('bkt', 'k', id, [{ partNumber: 1 }])
+      expect(done.size).toBe(3)
+    })
+
+    it('sweeps only stale staged uploads and leaves final objects alone', async () => {
+      await local.putObject('bkt', 'final.bin', Buffer.from('keep me'), 7)
+      const staleId = await local.createMultipartUpload('bkt', 'stale.bin')
+      await local.uploadPart('bkt', 'stale.bin', staleId, 1, Buffer.from('x'))
+      const freshId = await local.createMultipartUpload('bkt', 'fresh.bin')
+      await local.uploadPart('bkt', 'fresh.bin', freshId, 1, Buffer.from('y'))
+      const old = new Date(Date.now() - 48 * 3600 * 1000)
+      const staleDir = fs
+        .readdirSync(path.join(base, '.multipart'), { recursive: true })
+        .map(String)
+        .find((e) => e.endsWith(staleId))!
+      const staleAbs = path.join(base, '.multipart', staleDir)
+      for (const f of fs.readdirSync(staleAbs)) fs.utimesSync(path.join(staleAbs, f), old, old)
+      fs.utimesSync(staleAbs, old, old)
+
+      expect(await local.sweepStaleMultipartUploads()).toBe(1)
+      await expect(local.listParts('bkt', 'stale.bin', staleId)).rejects.toThrow(/does not exist/)
+      expect((await local.listParts('bkt', 'fresh.bin', freshId)).length).toBe(1)
+      expect(readFinal('final.bin').toString()).toBe('keep me')
+      expect(await local.sweepStaleMultipartUploads()).toBe(0)
+    })
+
+    it('rejects a key that escapes into a sibling directory sharing the base path prefix', async () => {
+      const sibling = `../${path.basename(base)}-evil`
+      await expect(local.putObject(sibling, 'k', Buffer.from('x'), 1)).rejects.toThrow(/traversal/)
+      expect(fs.existsSync(`${base}-evil`)).toBe(false)
     })
 
     it('rejects invalid part numbers', async () => {
@@ -757,36 +873,67 @@ describe('S3Service implementations', () => {
       ).rejects.toThrow(/upload id/)
     })
 
+    const paramsOf = (u: string) => {
+      const q = new URL(u, 'http://x').searchParams
+      return { sig: q.get('Signature')!, exp: Number(q.get('exp')) }
+    }
+
     it('binds part URL signatures to method, upload id and part number', () => {
-      const sigOf = (u: string) => new URL(u, 'http://x').searchParams.get('Signature')!
-      const part1 = signLocalUrl('bkt', 'k', { method: 'PUT', uploadId: 'up1', partNumber: 1 })
-      const sig = sigOf(part1)
-      expect(
-        verifyLocalUrlSignature('bkt', 'k', sig, { method: 'PUT', uploadId: 'up1', partNumber: 1 }),
-      ).toBe(true)
-      expect(
-        verifyLocalUrlSignature('bkt', 'k', sig, { method: 'PUT', uploadId: 'up1', partNumber: 2 }),
-      ).toBe(false)
-      expect(
-        verifyLocalUrlSignature('bkt', 'k', sig, {
-          method: 'DELETE',
-          uploadId: 'up1',
-          partNumber: 1,
-        }),
-      ).toBe(false)
-      expect(
-        verifyLocalUrlSignature('bkt', 'k', sig, { method: 'PUT', uploadId: 'up2', partNumber: 1 }),
-      ).toBe(false)
+      const mp = { method: 'PUT', uploadId: 'up1', partNumber: 1 }
+      const { sig, exp } = paramsOf(signLocalUrl('bkt', 'k', mp))
+      const verify = (m?: typeof mp, e: number | undefined = exp, s = sig) =>
+        verifyLocalUrlSignature('bkt', 'k', s, m, e)
+      expect(verify(mp)).toBe(true)
+      expect(verify({ ...mp, partNumber: 2 })).toBe(false)
+      expect(verify({ ...mp, method: 'DELETE' })).toBe(false)
+      expect(verify({ ...mp, uploadId: 'up2' })).toBe(false)
       // A whole-object URL signature cannot be replayed as a part upload, nor the reverse.
-      expect(verifyLocalUrlSignature('bkt', 'k', sig)).toBe(false)
-      const whole = sigOf(signLocalUrl('bkt', 'k'))
-      expect(
-        verifyLocalUrlSignature('bkt', 'k', whole, {
-          method: 'PUT',
-          uploadId: 'up1',
-          partNumber: 1,
-        }),
-      ).toBe(false)
+      expect(verify(undefined)).toBe(false)
+      const whole = paramsOf(signLocalUrl('bkt', 'k'))
+      expect(verifyLocalUrlSignature('bkt', 'k', whole.sig, mp, whole.exp)).toBe(false)
+      expect(verifyLocalUrlSignature('bkt', 'k', whole.sig, undefined, whole.exp)).toBe(true)
+    })
+
+    it('expires signed URLs and signs the expiry', () => {
+      const mp = { method: 'PUT', uploadId: 'up1', partNumber: 1 }
+      const now = Date.now()
+      const { sig, exp } = paramsOf(signLocalUrl('bkt', 'k', mp, 60, now))
+      expect(exp).toBe(Math.floor(now / 1000) + 60)
+      expect(checkLocalUrl('bkt', 'k', sig, mp, exp, now + 30_000)).toBe('ok')
+      expect(checkLocalUrl('bkt', 'k', sig, mp, exp, now + 61_000)).toBe('expired')
+      // Moving the expiry forward invalidates the signature rather than extending the URL.
+      expect(checkLocalUrl('bkt', 'k', sig, mp, exp + 3600, now + 61_000)).toBe('invalid')
+      // Multipart URLs without an expiry are never valid.
+      expect(checkLocalUrl('bkt', 'k', sig, mp, undefined, now)).toBe('invalid')
+    })
+
+    it('uses PRESIGNED_URL_EXPIRES_IN hours as the default lifetime', () => {
+      const saved = process.env.PRESIGNED_URL_EXPIRES_IN
+      try {
+        delete process.env.PRESIGNED_URL_EXPIRES_IN
+        expect(localUrlLifetimeSeconds()).toBe(5 * 3600)
+        process.env.PRESIGNED_URL_EXPIRES_IN = '2'
+        expect(localUrlLifetimeSeconds()).toBe(2 * 3600)
+      } finally {
+        if (saved === undefined) delete process.env.PRESIGNED_URL_EXPIRES_IN
+        else process.env.PRESIGNED_URL_EXPIRES_IN = saved
+      }
+    })
+
+    it('does not let field boundaries shift between bucket and key', () => {
+      const { sig, exp } = paramsOf(signLocalUrl('a', 'b/c'))
+      expect(verifyLocalUrlSignature('a', 'b/c', sig, undefined, exp)).toBe(true)
+      expect(verifyLocalUrlSignature('a/b', 'c', sig, undefined, exp)).toBe(false)
+    })
+
+    it('still accepts a legacy non-expiring whole-object PUT signature, but not for multipart', () => {
+      const secret = process.env.BETTER_AUTH_SECRET || 'shumai-local-storage-secret'
+      const legacy = crypto.createHmac('sha256', secret).update('bkt/k').digest('hex')
+      expect(verifyLocalUrlSignature('bkt', 'k', legacy)).toBe(true)
+      expect(verifyLocalUrlSignature('bkt', 'other', legacy)).toBe(false)
+      expect(verifyLocalUrlSignature('bkt', 'k', legacy, { method: 'DELETE', uploadId: 'u' })).toBe(
+        false,
+      )
     })
   })
 

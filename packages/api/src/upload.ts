@@ -17,8 +17,9 @@ import { NotificationType } from '@shumai/db'
 import {
   LocalMultipartError,
   LocalStorageService,
+  checkLocalUrl,
+  maxLocalPartSize,
   s3Service,
-  verifyLocalUrlSignature,
 } from '@shumai/core/src/s3/s3'
 import type { Prisma } from '@shumai/db'
 
@@ -53,6 +54,19 @@ const xmlResponse = (c: Context, inner: string) =>
     'Content-Type': 'application/xml',
   })
 
+function localMultipartStatus(err: LocalMultipartError): 400 | 404 | 409 | 413 {
+  switch (err.code) {
+    case 'NoSuchUpload':
+      return 404
+    case 'EntityTooLarge':
+      return 413
+    case 'OperationAborted':
+      return 409
+    default:
+      return 400
+  }
+}
+
 /** S3-compatible multipart operations for the local storage backend (create/part/list/complete/abort). */
 async function handleLocalMultipart(
   c: Context,
@@ -74,6 +88,10 @@ async function handleLocalMultipart(
     if (!uploadId) return c.text('Missing uploadId', 400)
     if (method === 'PUT') {
       if (partNumber == null) return c.text('Missing partNumber', 400)
+      const declared = c.req.header('Content-Length')
+      if (declared !== undefined && Number(declared) > maxLocalPartSize()) {
+        return c.text('EntityTooLarge: Part exceeds the maximum part size', 413)
+      }
       const body = c.req.raw.body ?? (await c.req.arrayBuffer())
       const part = await s3Service.uploadPart(bucket, key, uploadId, partNumber, body)
       c.header('ETag', part.etag)
@@ -104,7 +122,7 @@ async function handleLocalMultipart(
     return c.body(null, 204)
   } catch (err) {
     if (err instanceof LocalMultipartError) {
-      return c.text(`${err.code}: ${err.message}`, err.code === 'NoSuchUpload' ? 404 : 400)
+      return c.text(`${err.code}: ${err.message}`, localMultipartStatus(err))
     }
     throw err
   }
@@ -115,16 +133,16 @@ export const localUploadRoute = new Hono().on(
   '/upload/local',
   zValidator('query', localUploadQuerySchema),
   async (c) => {
-    const { bucket, key, Signature, uploadId, partNumber } = c.req.valid('query')
+    const { bucket, key, Signature, uploadId, partNumber, exp } = c.req.valid('query')
     // A plain PUT without an upload id is the whole-object upload (signature over bucket/key only).
     // Every other request is a multipart operation, signed for its method, upload id and part number.
     const method = c.req.method
     const multipart = method !== 'PUT' || uploadId !== undefined
     const params = multipart ? { method, uploadId, partNumber } : undefined
 
-    if (!verifyLocalUrlSignature(bucket, key, Signature, params)) {
-      return c.text('Invalid signature', 403)
-    }
+    const check = checkLocalUrl(bucket, key, Signature, params, exp)
+    if (check === 'expired') return c.text('URL expired', 403)
+    if (check !== 'ok') return c.text('Invalid signature', 403)
 
     if (multipart) return handleLocalMultipart(c, bucket, key, uploadId, partNumber)
 

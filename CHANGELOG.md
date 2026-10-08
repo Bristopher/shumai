@@ -11,7 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 * **kanban**: Related assets on a task are now clickable, taking you directly to that file or folder in its project
 
 ### Fixed
-* **storage**: Multipart uploads to the local storage backend now store each part separately and assemble them in order on completion, instead of every part overwriting the whole file
+
+* **storage**: Multipart uploads to the local storage backend (used by API and S3-compatible clients, not the web UI) now store each part separately and assemble them in order on completion, instead of every part overwriting the whole file. Local multipart and upload URLs now expire (`PRESIGNED_URL_EXPIRES_IN`, default 5 hours), aborting a multipart upload no longer deletes an existing object at that key, parts are capped at 5 GiB (or `MAX_REQUEST_BODY_SIZE` if lower), a retried complete is idempotent, and abandoned multipart uploads are swept after 24 hours
 
 ### Changed
 
