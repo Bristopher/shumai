@@ -130,9 +130,11 @@ export class SqlQueryBuilder {
     const notLink = Prisma.sql`a.type <> 'symlink'`
     const memberIds = this.stackedMemberIds
       ? Prisma.sql`,
-        CASE WHEN s.stack_on THEN array_agg(s.id::text ORDER BY s.stack_rank, s.name, s.id)
+        CASE WHEN s.stack_on THEN array_agg(s.id::text)
           FILTER (WHERE s.stack_is_raw OR s.stack_is_preview)
-          OVER (PARTITION BY s.parent_id, s.stack_key) END AS stack_ids`
+          OVER (PARTITION BY s.parent_id, s.stack_key
+            ORDER BY s.stack_rank, s.name, s.id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) END AS stack_ids`
       : Prisma.empty
     // The derived tables carry only the columns the outer query reads (id, name, parent_id,
     // size_byte, sort_index, created_at), not `a.*`: every row is held while the windows run.

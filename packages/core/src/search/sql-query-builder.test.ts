@@ -71,7 +71,10 @@ describe('SqlQueryBuilder', () => {
         .build()
 
     it('returns the matched ids of each stack only when asked', () => {
-      expect(build(true).text).toContain('array_agg(s.id::text ORDER BY s.stack_rank, s.name, s.id)')
+      expect(build(true).text).toContain('array_agg(s.id::text)')
+      expect(build(true).text).toMatch(
+        /ORDER BY s.stack_rank, s.name, s\.id\s+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING/,
+      )
       expect(build(true).text).toContain('AS stack_ids')
       expect(build(false).text).not.toContain('stack_ids')
     })
@@ -90,7 +93,9 @@ describe('SqlQueryBuilder', () => {
 
     it('carries only the columns the outer query needs', () => {
       const text = build(false).text
-      expect(text).toContain('SELECT a.id, a.name, a.parent_id, a.size_byte, a.sort_index, a.created_at')
+      expect(text).toContain(
+        'SELECT a.id, a.name, a.parent_id, a.size_byte, a.sort_index, a.created_at',
+      )
       expect(text).not.toContain('SELECT a.*')
     })
   })
