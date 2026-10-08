@@ -37,6 +37,10 @@ export interface DecodeRawOptions {
 /**
  * Maps EXIF orientation values (1–8) to Sharp rotation operations.
  * Follows the same mapping as Immich's ORIENTATION_TO_SHARP_ROTATION.
+ *
+ * Sharp applies flip/flop before rotate regardless of call order, so the transposed
+ * orientations (5 and 7) are expressed as a flip followed by a rotation. The values are
+ * verified against `sharp(...).rotate()` (autoOrient) in raw-orientation.test.ts.
  */
 export const EXIF_ORIENTATION_TO_ROTATION: Record<
   number,
@@ -46,9 +50,9 @@ export const EXIF_ORIENTATION_TO_ROTATION: Record<
   2: { flop: true }, // Mirror horizontal
   3: { angle: 180 }, // Rotate 180°
   4: { angle: 180, flop: true }, // Mirror vertical
-  5: { angle: 270, flip: true }, // Mirror horizontal + rotate 270° CW
+  5: { angle: 90, flip: true }, // Transpose (mirror across the main diagonal)
   6: { angle: 90 }, // Rotate 90° CW
-  7: { angle: 90, flip: true }, // Mirror horizontal + rotate 90° CW
+  7: { angle: 270, flip: true }, // Transverse (mirror across the anti-diagonal)
   8: { angle: 270 }, // Rotate 270° CW
 }
 
