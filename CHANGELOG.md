@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 * **kanban**: Related assets on a task are now clickable, taking you directly to that file or folder in its project
 
 ### Fixed
+* **storage**: Multipart uploads to the local storage backend now store each part separately and assemble them in order on completion, instead of every part overwriting the whole file
 
 ### Changed
 

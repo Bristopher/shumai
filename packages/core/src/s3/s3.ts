@@ -25,18 +25,39 @@ import { ulid } from 'ulid'
 import { LruTtlCache } from '../cache/lru-ttl-cache'
 import { detectSupportedMimeType } from '../utils/mime'
 
-export function signLocalUrl(bucket: string, key: string): string {
-  const secret = process.env.BETTER_AUTH_SECRET || 'shumai-local-storage-secret'
-  const hmac = crypto.createHmac('sha256', secret)
-  hmac.update(`${bucket}/${key}`)
-  const signature = hmac.digest('hex')
-  return `/api/upload/local?bucket=${encodeURIComponent(bucket)}&key=${encodeURIComponent(key)}&Signature=${signature}`
+/** Multipart operations bind the HTTP method, upload id and part number into the signature. */
+export interface LocalMultipartParams {
+  method: string
+  uploadId?: string
+  partNumber?: number
 }
 
-export function verifyLocalUrlSignature(bucket: string, key: string, signature: string): boolean {
+function localSignaturePayload(bucket: string, key: string, mp?: LocalMultipartParams): string {
+  return mp
+    ? `${bucket}/${key}?${mp.method}:${mp.uploadId ?? ''}:${mp.partNumber ?? ''}`
+    : `${bucket}/${key}`
+}
+
+export function signLocalUrl(bucket: string, key: string, mp?: LocalMultipartParams): string {
   const secret = process.env.BETTER_AUTH_SECRET || 'shumai-local-storage-secret'
   const hmac = crypto.createHmac('sha256', secret)
-  hmac.update(`${bucket}/${key}`)
+  hmac.update(localSignaturePayload(bucket, key, mp))
+  const signature = hmac.digest('hex')
+  let url = `/api/upload/local?bucket=${encodeURIComponent(bucket)}&key=${encodeURIComponent(key)}`
+  if (mp?.uploadId) url += `&uploadId=${encodeURIComponent(mp.uploadId)}`
+  if (mp?.partNumber != null) url += `&partNumber=${mp.partNumber}`
+  return `${url}&Signature=${signature}`
+}
+
+export function verifyLocalUrlSignature(
+  bucket: string,
+  key: string,
+  signature: string,
+  mp?: LocalMultipartParams,
+): boolean {
+  const secret = process.env.BETTER_AUTH_SECRET || 'shumai-local-storage-secret'
+  const hmac = crypto.createHmac('sha256', secret)
+  hmac.update(localSignaturePayload(bucket, key, mp))
   const expected = hmac.digest('hex')
   try {
     return crypto.timingSafeEqual(Buffer.from(signature, 'hex'), Buffer.from(expected, 'hex'))
@@ -75,6 +96,43 @@ export function buildContentDisposition(filename?: string | null): string {
     return `attachment; filename*=UTF-8''${encoded}`
   }
   return `attachment; filename="${sanitized}"; filename*=UTF-8''${encoded}`
+}
+
+/** Error with an S3-style code, thrown by the local multipart implementation. */
+export class LocalMultipartError extends Error {
+  constructor(
+    public readonly code: 'InvalidArgument' | 'NoSuchUpload' | 'InvalidPart',
+    message: string,
+  ) {
+    super(message)
+    this.name = 'LocalMultipartError'
+  }
+}
+
+const LOCAL_MULTIPART_DIR = '.multipart'
+const MAX_PART_NUMBER = 10000
+const UPLOAD_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
+
+function assertValidUploadId(uploadId: string): void {
+  if (!UPLOAD_ID_PATTERN.test(uploadId)) {
+    throw new LocalMultipartError('InvalidArgument', 'Invalid upload id')
+  }
+}
+
+function assertValidPartNumber(partNumber: number): void {
+  if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > MAX_PART_NUMBER) {
+    throw new LocalMultipartError(
+      'InvalidArgument',
+      `Part number must be an integer between 1 and ${MAX_PART_NUMBER}`,
+    )
+  }
+}
+
+export interface LocalPartInfo {
+  partNumber: number
+  size: number
+  etag: string
+  lastModified: Date
 }
 
 export interface S3Object {
@@ -515,7 +573,13 @@ export class LocalStorageService implements S3Service {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true })
     }
+    await this.writeBody(filePath, body)
+  }
 
+  private async writeBody(
+    filePath: string,
+    body: Buffer | Uint8Array | ArrayBuffer | string | ReadableStream | NodeJS.ReadableStream,
+  ): Promise<void> {
     if (
       body &&
       typeof body === 'object' &&
@@ -712,18 +776,166 @@ export class LocalStorageService implements S3Service {
     key: string,
     request: S3SignRequest,
   ): Promise<{ url: string }> {
-    if (request.method === 'PUT') {
+    const { method, uploadId, partNumber } = request
+    if (method === 'PUT' && !(uploadId && partNumber != null)) {
       return { url: `${this.endpoint}${signLocalUrl(bucket, key)}` }
     }
-    const url = await this.presign(bucket, key, request.method)
-    return { url }
+    if (!['PUT', 'POST', 'GET', 'DELETE'].includes(method)) {
+      throw new Error(`Unsupported method for presignMultipart: ${method}`)
+    }
+    // Part uploads, complete (POST with id), list (GET) and abort (DELETE) need an upload id;
+    // POST without one creates the upload. Each URL is signed for exactly this operation.
+    if (uploadId) assertValidUploadId(uploadId)
+    else if (method !== 'POST')
+      throw new LocalMultipartError('InvalidArgument', 'Missing upload id')
+    if (partNumber != null) assertValidPartNumber(partNumber)
+    this.getFilePath(bucket, key)
+    return {
+      url: `${this.endpoint}${signLocalUrl(bucket, key, { method, uploadId, partNumber })}`,
+    }
   }
 
-  async abortMultipartUpload(
+  /** Parts live outside the bucket tree, scoped to the object key so an id cannot cross objects. */
+  private getUploadDir(bucket: string, key: string, uploadId: string): string {
+    assertValidUploadId(uploadId)
+    this.getFilePath(bucket, key)
+    const scope = crypto.createHash('sha256').update(`${bucket}/${key}`).digest('hex').slice(0, 32)
+    return path.join(this.basePath, LOCAL_MULTIPART_DIR, scope, uploadId)
+  }
+
+  private async getPartInfo(partPath: string, partNumber: number): Promise<LocalPartInfo> {
+    const stats = await fs.promises.stat(partPath)
+    const etag = `"${crypto.createHash('md5').update(`${partNumber}:${stats.size}:${stats.mtimeMs}`).digest('hex')}"`
+    return { partNumber, size: stats.size, etag, lastModified: stats.mtime }
+  }
+
+  async createMultipartUpload(bucket: string, key: string): Promise<string> {
+    const uploadId = ulid()
+    await fs.promises.mkdir(this.getUploadDir(bucket, key, uploadId), { recursive: true })
+    return uploadId
+  }
+
+  /** Stores one part as its own file (via temp + rename, so a retried part replaces it atomically). */
+  async uploadPart(
     bucket: string,
     key: string,
-    _uploadId: string, // eslint-disable-line @typescript-eslint/no-unused-vars
-  ): Promise<void> {
+    uploadId: string,
+    partNumber: number,
+    body: Parameters<S3Service['putObject']>[2],
+  ): Promise<LocalPartInfo> {
+    assertValidPartNumber(partNumber)
+    const dir = this.getUploadDir(bucket, key, uploadId)
+    if (!fs.existsSync(dir)) {
+      throw new LocalMultipartError('NoSuchUpload', 'The specified upload does not exist')
+    }
+    const partPath = path.join(dir, `part-${partNumber}`)
+    const tmpPath = `${partPath}.${ulid()}.tmp`
+    try {
+      await this.writeBody(tmpPath, body)
+      await fs.promises.rename(tmpPath, partPath)
+    } catch (err) {
+      await fs.promises.unlink(tmpPath).catch(() => {})
+      throw err
+    }
+    return this.getPartInfo(partPath, partNumber)
+  }
+
+  async listParts(bucket: string, key: string, uploadId: string): Promise<LocalPartInfo[]> {
+    const dir = this.getUploadDir(bucket, key, uploadId)
+    let names: string[]
+    try {
+      names = await fs.promises.readdir(dir)
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new LocalMultipartError('NoSuchUpload', 'The specified upload does not exist')
+      }
+      throw e
+    }
+    const parts: LocalPartInfo[] = []
+    for (const name of names) {
+      const match = /^part-(\d+)$/.exec(name)
+      if (match) parts.push(await this.getPartInfo(path.join(dir, name), Number(match[1])))
+    }
+    return parts.sort((a, b) => a.partNumber - b.partNumber)
+  }
+
+  /**
+   * Concatenates the listed parts, in the given (ascending) order, into the final object. The
+   * result is built in a temp file and renamed into place, so readers never see a partial object.
+   */
+  async completeMultipartUpload(
+    bucket: string,
+    key: string,
+    uploadId: string,
+    parts: { partNumber: number; etag?: string }[],
+  ): Promise<{ etag: string; size: number }> {
+    if (parts.length === 0) {
+      throw new LocalMultipartError('InvalidPart', 'At least one part is required')
+    }
+    const dir = this.getUploadDir(bucket, key, uploadId)
+    const stored = new Map(
+      (await this.listParts(bucket, key, uploadId)).map((p) => [p.partNumber, p]),
+    )
+    const unquote = (etag: string) => etag.replace(/^"|"$/g, '')
+    let previous = 0
+    let expectedSize = 0
+    for (const part of parts) {
+      assertValidPartNumber(part.partNumber)
+      if (part.partNumber <= previous) {
+        throw new LocalMultipartError('InvalidPart', 'Parts must be in ascending order')
+      }
+      previous = part.partNumber
+      const info = stored.get(part.partNumber)
+      if (!info || (part.etag && unquote(part.etag) !== unquote(info.etag))) {
+        throw new LocalMultipartError(
+          'InvalidPart',
+          `Part ${part.partNumber} is missing or changed`,
+        )
+      }
+      expectedSize += info.size
+    }
+
+    const finalPath = this.getFilePath(bucket, key)
+    await fs.promises.mkdir(path.dirname(finalPath), { recursive: true })
+    const assembledPath = path.join(dir, `assembled.${ulid()}.tmp`)
+    const handle = await fs.promises.open(assembledPath, 'w')
+    try {
+      for (const part of parts) {
+        for await (const chunk of fs.createReadStream(path.join(dir, `part-${part.partNumber}`))) {
+          await handle.write(chunk as Buffer)
+        }
+      }
+      const { size } = await handle.stat()
+      if (size !== expectedSize) {
+        throw new Error(`Assembled size ${size} does not match expected ${expectedSize}`)
+      }
+      await handle.close()
+      await fs.promises.rename(assembledPath, finalPath)
+    } catch (err) {
+      await handle.close().catch(() => {})
+      await fs.promises.unlink(assembledPath).catch(() => {})
+      throw err
+    }
+    await this.removeUploadDir(dir)
+    const etag = `"${crypto
+      .createHash('md5')
+      .update(parts.map((p) => stored.get(p.partNumber)!.etag).join(''))
+      .digest('hex')}-${parts.length}"`
+    return { etag, size: expectedSize }
+  }
+
+  private async removeUploadDir(dir: string): Promise<void> {
+    // Best effort: on Windows a just-read file can still be briefly locked (EBUSY).
+    await fs.promises
+      .rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+      .catch(() => {})
+    await fs.promises.rmdir(path.dirname(dir)).catch(() => {}) // drop the key scope dir once empty
+  }
+
+  async abortMultipartUpload(bucket: string, key: string, uploadId: string): Promise<void> {
+    if (UPLOAD_ID_PATTERN.test(uploadId)) {
+      await this.removeUploadDir(this.getUploadDir(bucket, key, uploadId))
+    }
     await this.deleteObject(bucket, key)
   }
 

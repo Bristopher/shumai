@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as os from 'os'
+import { Readable } from 'stream'
 import * as fs from 'fs'
 import * as path from 'path'
 import {
@@ -10,7 +12,13 @@ import {
   ListPartsCommand,
   AbortMultipartUploadCommand,
 } from '@aws-sdk/client-s3'
-import { buildContentDisposition, LocalStorageService, S3StorageService } from './s3'
+import {
+  buildContentDisposition,
+  LocalStorageService,
+  S3StorageService,
+  signLocalUrl,
+  verifyLocalUrlSignature,
+} from './s3'
 
 const s3ClientConstructorSpy = vi.fn()
 const s3SendSpy = vi.fn()
@@ -606,6 +614,179 @@ describe('S3Service implementations', () => {
     it('should resolveInput to presigned URL if file does not exist on disk', async () => {
       const input = await localS3.resolveInput('my-bucket', 'nonexistent.mp4')
       expect(input).toBe('http://localhost:3000/files/my-bucket/nonexistent.mp4')
+    })
+  })
+
+  describe('LocalStorageService multipart', () => {
+    let base: string
+    let local: LocalStorageService
+    const readFinal = (key: string) => fs.readFileSync(path.join(base, 'bkt', key))
+    const partFiles = () => {
+      const root = path.join(base, '.multipart')
+      return fs.existsSync(root) ? fs.readdirSync(root, { recursive: true }) : []
+    }
+
+    beforeEach(() => {
+      base = fs.mkdtempSync(path.join(os.tmpdir(), 'shumai-mp-'))
+      local = new LocalStorageService('http://localhost:3000', base)
+    })
+    afterEach(() => {
+      fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+    })
+
+    it('assembles parts uploaded out of order into the object in part order', async () => {
+      const id = await local.createMultipartUpload('bkt', 'dir/file.bin')
+      await local.uploadPart('bkt', 'dir/file.bin', id, 3, Buffer.from('CCC'))
+      await local.uploadPart('bkt', 'dir/file.bin', id, 1, Buffer.from('AAAA'))
+      const p2 = await local.uploadPart('bkt', 'dir/file.bin', id, 2, Buffer.from('BB'))
+      expect(p2.size).toBe(2)
+
+      const listed = await local.listParts('bkt', 'dir/file.bin', id)
+      expect(listed.map((p) => p.partNumber)).toEqual([1, 2, 3])
+
+      const done = await local.completeMultipartUpload(
+        'bkt',
+        'dir/file.bin',
+        id,
+        listed.map((p) => ({ partNumber: p.partNumber, etag: p.etag })),
+      )
+      expect(done.size).toBe(9)
+      expect(readFinal('dir/file.bin').toString()).toBe('AAAABBCCC')
+      expect(await local.getObjectSize('bkt', 'dir/file.bin')).toBe(9)
+      expect(partFiles()).toEqual([])
+    })
+
+    it('accepts streamed part bodies and replaces a retried part', async () => {
+      const id = await local.createMultipartUpload('bkt', 'k')
+      await local.uploadPart('bkt', 'k', id, 1, Buffer.from('old'))
+      await local.uploadPart(
+        'bkt',
+        'k',
+        id,
+        1,
+        Readable.from([Buffer.from('ne'), Buffer.from('w')]),
+      )
+      await local.completeMultipartUpload('bkt', 'k', id, [{ partNumber: 1 }])
+      expect(readFinal('k').toString()).toBe('new')
+    })
+
+    it('rejects completing with a missing part, wrong etag, or unordered parts', async () => {
+      const id = await local.createMultipartUpload('bkt', 'k')
+      await local.uploadPart('bkt', 'k', id, 1, Buffer.from('a'))
+      await local.uploadPart('bkt', 'k', id, 2, Buffer.from('b'))
+      await expect(
+        local.completeMultipartUpload('bkt', 'k', id, [{ partNumber: 1 }, { partNumber: 3 }]),
+      ).rejects.toThrow(/Part 3/)
+      await expect(
+        local.completeMultipartUpload('bkt', 'k', id, [{ partNumber: 1, etag: '"nope"' }]),
+      ).rejects.toThrow(/Part 1/)
+      await expect(
+        local.completeMultipartUpload('bkt', 'k', id, [{ partNumber: 2 }, { partNumber: 1 }]),
+      ).rejects.toThrow(/ascending/)
+      await expect(local.completeMultipartUpload('bkt', 'k', id, [])).rejects.toThrow()
+      expect(fs.existsSync(path.join(base, 'bkt', 'k'))).toBe(false)
+    })
+
+    it('abort removes the part files and any partial object', async () => {
+      const id = await local.createMultipartUpload('bkt', 'k')
+      await local.uploadPart('bkt', 'k', id, 1, Buffer.from('a'))
+      expect(partFiles().length).toBeGreaterThan(0)
+      await local.abortMultipartUpload('bkt', 'k', id)
+      expect(partFiles()).toEqual([])
+      await expect(local.listParts('bkt', 'k', id)).rejects.toThrow(/does not exist/)
+    })
+
+    it('rejects invalid part numbers', async () => {
+      const id = await local.createMultipartUpload('bkt', 'k')
+      for (const bad of [0, -1, 1.5, 10001, Number.NaN]) {
+        await expect(local.uploadPart('bkt', 'k', id, bad, Buffer.from('x'))).rejects.toThrow(
+          /Part number/,
+        )
+        await expect(
+          local.presignMultipart('bkt', 'k', {
+            key: 'k',
+            method: 'PUT',
+            uploadId: id,
+            partNumber: bad,
+            fileId: 'f',
+          }),
+        ).rejects.toThrow(/Part number/)
+      }
+    })
+
+    it('rejects path traversal in upload ids and keys', async () => {
+      await expect(local.uploadPart('bkt', 'k', '../evil', 1, Buffer.from('x'))).rejects.toThrow(
+        /Invalid upload id/,
+      )
+      await expect(local.listParts('bkt', 'k', '..\\evil')).rejects.toThrow(/Invalid upload id/)
+      await expect(local.createMultipartUpload('bkt', '../../escape')).rejects.toThrow(/traversal/)
+      const id = await local.createMultipartUpload('bkt', 'k')
+      await expect(
+        local.completeMultipartUpload('bkt', '../../escape', id, [{ partNumber: 1 }]),
+      ).rejects.toThrow(/traversal/)
+      expect(fs.existsSync(path.join(base, '..', 'escape'))).toBe(false)
+    })
+
+    it('does not let an upload id be used against a different key', async () => {
+      const id = await local.createMultipartUpload('bkt', 'a')
+      await expect(local.uploadPart('bkt', 'b', id, 1, Buffer.from('x'))).rejects.toThrow(
+        /does not exist/,
+      )
+    })
+
+    it('presigns a distinct, operation-bound URL per part', async () => {
+      const req = { key: 'k', uploadId: 'up1', fileId: 'f' }
+      const url = async (method: 'PUT' | 'POST' | 'GET' | 'DELETE', partNumber?: number) =>
+        (await local.presignMultipart('bkt', 'k', { ...req, method, partNumber })).url
+      const p1 = await url('PUT', 1)
+      const p2 = await url('PUT', 2)
+      expect(p1).not.toBe(p2)
+      expect(p1).toContain('uploadId=up1')
+      expect(p1).toContain('partNumber=1')
+      const sigs = new Set([p1, p2, await url('POST'), await url('GET'), await url('DELETE')])
+      expect(sigs.size).toBe(5)
+      // Creating an upload needs no id; other operations do.
+      const create = await local.presignMultipart('bkt', 'k', {
+        key: 'k',
+        method: 'POST',
+        fileId: 'f',
+      })
+      expect(create.url).not.toContain('uploadId')
+      await expect(
+        local.presignMultipart('bkt', 'k', { key: 'k', method: 'DELETE', fileId: 'f' }),
+      ).rejects.toThrow(/upload id/)
+    })
+
+    it('binds part URL signatures to method, upload id and part number', () => {
+      const sigOf = (u: string) => new URL(u, 'http://x').searchParams.get('Signature')!
+      const part1 = signLocalUrl('bkt', 'k', { method: 'PUT', uploadId: 'up1', partNumber: 1 })
+      const sig = sigOf(part1)
+      expect(
+        verifyLocalUrlSignature('bkt', 'k', sig, { method: 'PUT', uploadId: 'up1', partNumber: 1 }),
+      ).toBe(true)
+      expect(
+        verifyLocalUrlSignature('bkt', 'k', sig, { method: 'PUT', uploadId: 'up1', partNumber: 2 }),
+      ).toBe(false)
+      expect(
+        verifyLocalUrlSignature('bkt', 'k', sig, {
+          method: 'DELETE',
+          uploadId: 'up1',
+          partNumber: 1,
+        }),
+      ).toBe(false)
+      expect(
+        verifyLocalUrlSignature('bkt', 'k', sig, { method: 'PUT', uploadId: 'up2', partNumber: 1 }),
+      ).toBe(false)
+      // A whole-object URL signature cannot be replayed as a part upload, nor the reverse.
+      expect(verifyLocalUrlSignature('bkt', 'k', sig)).toBe(false)
+      const whole = sigOf(signLocalUrl('bkt', 'k'))
+      expect(
+        verifyLocalUrlSignature('bkt', 'k', whole, {
+          method: 'PUT',
+          uploadId: 'up1',
+          partNumber: 1,
+        }),
+      ).toBe(false)
     })
   })
 
