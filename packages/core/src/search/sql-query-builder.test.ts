@@ -1,6 +1,40 @@
 import { describe, expect, it } from 'vitest'
-import { SqlQueryBuilder } from './sql-query-builder'
+import { SqlQueryBuilder, buildFileTypeCountsQuery } from './sql-query-builder'
 import { Prisma } from '@shumai/db'
+
+describe('buildFileTypeCountsQuery', () => {
+  const base = { operator: 'AND' as const, conditions: [], showSymlink: undefined }
+
+  it('is a single grouped COUNT over the folders, ignoring any file-type filter', () => {
+    const q = buildFileTypeCountsQuery(['f1', 'f2'], base)
+    expect(q.text).toContain('count(*) AS count FROM assets a WHERE a.is_deleted = false')
+    expect(q.text).toContain('a.parent_id = ANY($1)')
+    expect(q.text).toMatch(/GROUP BY 1 ORDER BY 2 DESC, 1 ASC LIMIT \$\d+$/)
+    expect(q.text).not.toContain('::text[]')
+    expect(q.values[0]).toEqual(['f1', 'f2'])
+    expect(q.values.at(-1)).toBe(500)
+  })
+
+  it('keeps the regex backslash so extensions are extracted', () => {
+    expect(buildFileTypeCountsQuery(['f1'], base).text).toContain("'\\.([^.]+)$'")
+  })
+
+  it('applies the active search conditions like the listing does', () => {
+    const q = buildFileTypeCountsQuery(['f1'], {
+      operator: 'AND',
+      conditions: [{ field: 'name', operator: 'contains', value: 'beach' }],
+    })
+    expect(q.text).toContain('a.name ILIKE')
+    expect(q.values).toContain('%beach%')
+  })
+
+  it('includes symlinks only when asked', () => {
+    expect(buildFileTypeCountsQuery(['f1'], base).text).not.toContain("a.type = 'symlink'")
+    expect(buildFileTypeCountsQuery(['f1'], { ...base, showSymlink: true }).text).toContain(
+      "a.type = 'symlink'",
+    )
+  })
+})
 
 describe('SqlQueryBuilder', () => {
   it('correctly constructs a basic SQL query', () => {
