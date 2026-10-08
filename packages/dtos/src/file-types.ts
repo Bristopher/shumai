@@ -89,3 +89,24 @@ export const fileTypeCountSchema = z.object({
   count: z.number(),
 })
 export type FileTypeCount = z.infer<typeof fileTypeCountSchema>
+
+/**
+ * Roll per-extension counts up into per-group counts (every group is present, 0 when empty), so
+ * the group rows can show a number without a second query.
+ */
+export function groupFileTypeCounts(
+  counts: readonly FileTypeCount[] | undefined,
+): Record<FileTypeGroup, number> {
+  const totals = Object.fromEntries(
+    (Object.keys(FILE_TYPE_GROUPS) as FileTypeGroup[]).map((g) => [g, 0]),
+  ) as Record<FileTypeGroup, number>
+  const groupOf = new Map<string, FileTypeGroup>()
+  for (const group of Object.keys(FILE_TYPE_GROUPS) as FileTypeGroup[]) {
+    for (const ext of FILE_TYPE_GROUPS[group]) groupOf.set(ext, group)
+  }
+  for (const { extension, count } of counts ?? []) {
+    const group = groupOf.get(extension.toLowerCase())
+    if (group) totals[group] += count
+  }
+  return totals
+}

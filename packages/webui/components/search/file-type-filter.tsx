@@ -1,7 +1,9 @@
 import {
   FILE_TYPE_GROUP_PREFIX,
+  groupFileTypeCounts,
   isFileTypeFilterActive,
   type FileTypeCount,
+  type SearchCondition,
   type FileTypeFilter as FileTypeFilterValue,
   type FileTypeGroup,
 } from '@shumai/dtos'
@@ -18,7 +20,9 @@ import { Separator } from '@/ui/components/ui/separator'
 import { Switch } from '@/ui/components/ui/switch'
 import { cn } from '@/ui/lib/utils'
 import { m } from '@/ui/paraglide/messages.js'
+import { getLocale } from '@/ui/paraglide/runtime.js'
 import { useUserMetadataStore } from '@/ui/stores/user-metadata'
+import { formatFileCount } from './file-type-counts'
 
 /** Where the file-type filter is remembered: per user, per project, like the sort order. */
 export const fileTypeMetadataKey = (projectId: string) => `project:${projectId}:fileTypes`
@@ -37,13 +41,23 @@ interface FileTypeFilterProps {
   teamId: string
   projectId: string
   folderId: string
+  /** Counts follow the listing: the same search conditions and recursion the file list uses. */
+  conditions?: SearchCondition[]
+  recursively?: boolean
   disabled?: boolean
 }
 
 const toggle = (list: string[], token: string) =>
   list.includes(token) ? list.filter((t) => t !== token) : [...list, token]
 
-export function FileTypeFilter({ teamId, projectId, folderId, disabled }: FileTypeFilterProps) {
+export function FileTypeFilter({
+  teamId,
+  projectId,
+  folderId,
+  conditions = [],
+  recursively = false,
+  disabled,
+}: FileTypeFilterProps) {
   const { metadata, setMetadata } = useUserMetadataStore()
   const [open, setOpen] = useState(false)
   const key = fileTypeMetadataKey(projectId)
@@ -54,17 +68,21 @@ export function FileTypeFilter({ teamId, projectId, folderId, disabled }: FileTy
   const activeCount = include.length + exclude.length
 
   const { data: counts } = useQuery({
-    queryKey: ['file-types', folderId],
+    queryKey: ['file-types', folderId, recursively, conditions],
     enabled: open && !!folderId,
     queryFn: async (): Promise<FileTypeCount[]> => {
-      const res = await client.api.folders[':folderId']['file-types'].$get({
+      const res = await client.api.folders[':folderId']['file-types'].$post({
         param: { folderId },
-        query: {},
+        json: { conditions, recursively },
       })
       if (!res.ok) throw new Error('failed to load file types')
       return (await res.json()).data
     },
   })
+
+  const groupCounts = counts ? groupFileTypeCounts(counts) : undefined
+  const locale = getLocale()
+  const fmt = (n: number) => formatFileCount(n, locale)
 
   const save = (next: FileTypeFilterValue) => setMetadata(teamId, key, next)
 
@@ -126,7 +144,12 @@ export function FileTypeFilter({ teamId, projectId, folderId, disabled }: FileTy
                   checked={include.includes(token)}
                   onCheckedChange={() => save({ include: toggle(include, token), exclude })}
                 />
-                {label()}
+                <span className="flex-1">{label()}</span>
+                {groupCounts && (
+                  <span className="text-xs tabular-nums text-muted-foreground">
+                    {fmt(groupCounts[group])}
+                  </span>
+                )}
               </label>
             )
           })}
@@ -155,7 +178,7 @@ export function FileTypeFilter({ teamId, projectId, folderId, disabled }: FileTy
                   <span className="flex-1 font-mono text-xs">
                     {extension ? `.${extension.toUpperCase()}` : m.file_type_no_extension()}
                   </span>
-                  <span className="text-xs tabular-nums text-muted-foreground">{count}</span>
+                  <span className="text-xs tabular-nums text-muted-foreground">{fmt(count)}</span>
                 </label>
               ))}
             </div>

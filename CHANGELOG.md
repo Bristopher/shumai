@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 * **kanban**: Related assets on a task are now clickable, taking you directly to that file or folder in its project
 * **file-browser**: Add a "Type" filter next to Sort: hide editing and sidecar files such as XMP with one switch, or show only RAW photos, JPEGs, HEIF, videos or any file extension found in the current folder (with counts); the choice is remembered per project
+* **file-browser**: The file-type filter now shows a count next to every group and extension, formatted for your language, and the counts follow the open folder, recursion and active search conditions
 
 ### Fixed
 

@@ -1,13 +1,18 @@
 import { prisma } from '@shumai/db'
 import { Prisma, AssetType, WorkflowTaskType } from '@shumai/db'
 import { AssetService, assetService } from '@shumai/core/src/asset/asset'
-import { AssetInfo, type FileTypeCount } from '@shumai/dtos'
+import {
+  AssetInfo,
+  fileTypeCountsRequestSchema,
+  type FileTypeCount,
+  type FileTypeCountsRequest,
+} from '@shumai/dtos'
 import { SearchRequest } from '@shumai/dtos'
 import { PaginatedData, decodeCursor, encodeCursor, PageInfo } from '@shumai/core/src/pagination'
 import { generateSearchNgrams } from '@shumai/core/src/utils/ngram'
 import { workflowService } from '@shumai/workflow-core'
 import { HTTPException } from 'hono/http-exception'
-import { SqlQueryBuilder } from './sql-query-builder'
+import { SqlQueryBuilder, buildFileTypeCountsQuery } from './sql-query-builder'
 
 export class SearchService {
   constructor(
@@ -446,26 +451,21 @@ export class SearchService {
   }
 
   /**
-   * How many files of each extension a folder holds (lowercase, "" for none), most common
-   * first. Feeds the file-type filter's list of choices.
+   * How many files of each extension a listing holds (lowercase, "" for none), most common
+   * first: one grouped COUNT scoped like the listing (folder, recursion, conditions) but
+   * ignoring the file-type filter itself. Feeds the file-type filter's group and extension counts.
    */
-  async fileTypeCounts(folderId: string, recursively = false): Promise<FileTypeCount[]> {
-    const folderIds = recursively
+  async fileTypeCounts(
+    folderId: string,
+    req: Partial<FileTypeCountsRequest> = {},
+  ): Promise<FileTypeCount[]> {
+    const parsed = fileTypeCountsRequestSchema.parse(req)
+    const folderIds = parsed.recursively
       ? await this.assetSvc.getDescendantFolderIds(folderId)
       : [folderId]
-    const fileTypes = [AssetType.file, AssetType.version_stack]
     const rows = await this.prismaClient.$queryRaw<
       Array<{ extension: string | null; count: bigint }>
-    >(Prisma.sql`
-      SELECT lower(substring(a.name from '\\.([^.]+)$')) AS extension, count(*) AS count
-      FROM assets a
-      WHERE a.is_deleted = false
-        AND a.parent_id = ANY(${folderIds})
-        AND a.type = ANY(${fileTypes}::"AssetType"[])
-      GROUP BY 1
-      ORDER BY 2 DESC, 1 ASC
-      LIMIT 100
-    `)
+    >(buildFileTypeCountsQuery(folderIds, parsed))
     return rows.map((r) => ({ extension: r.extension ?? '', count: Number(r.count) }))
   }
 }

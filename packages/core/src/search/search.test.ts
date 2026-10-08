@@ -1179,7 +1179,7 @@ describe('SearchService — file-type filter', () => {
         { extension: '', count: 1 },
       ]),
     )
-    const deep = await searchService.fileTypeCounts(rootId, true)
+    const deep = await searchService.fileTypeCounts(rootId, { recursively: true })
     expect(deep.find((c) => c.extension === 'raf')?.count).toBe(2)
   })
 })

@@ -1,6 +1,5 @@
 import { Hono } from 'hono'
 import { zValidator } from '@hono/zod-validator'
-import { z } from 'zod'
 import { authzService, Permission, ResourceType } from '@shumai/core/src/authz/authz'
 import { assetService } from '@shumai/core/src/asset/asset'
 import { searchService } from '@shumai/core/src/search/search'
@@ -12,7 +11,7 @@ import {
   updateAgentsMdRequestSchema,
 } from '@shumai/dtos'
 import { listChildrenRequestSchema, updateAssetOrderRequestSchema, AuditAction } from '@shumai/dtos'
-import { searchRequestSchema } from '@shumai/dtos'
+import { fileTypeCountsRequestSchema, searchRequestSchema } from '@shumai/dtos'
 import type { Prisma } from '@shumai/db'
 import { auditLogService } from '@shumai/core/src/auditLog/auditLog'
 
@@ -187,13 +186,13 @@ const route = new Hono<{ Variables: { user: User } }>()
     const result = await searchService.search(folderId, req)
     return c.json(result)
   })
-  .get(
+  .post(
     '/folders/:folderId/file-types',
-    zValidator('query', z.object({ recursively: z.enum(['true', 'false']).optional() })),
+    zValidator('json', fileTypeCountsRequestSchema),
     async (c) => {
       const folderId = c.req.param('folderId')
       const user = c.get('user')
-      const { recursively } = c.req.valid('query')
+      const req = c.req.valid('json')
 
       await authzService.hasPermission({
         user,
@@ -202,7 +201,7 @@ const route = new Hono<{ Variables: { user: User } }>()
         id: folderId,
       })
 
-      const counts = await searchService.fileTypeCounts(folderId, recursively === 'true')
+      const counts = await searchService.fileTypeCounts(folderId, req)
       return c.json({ data: counts })
     },
   )
