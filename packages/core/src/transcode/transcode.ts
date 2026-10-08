@@ -8,7 +8,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import PDFDocument from 'pdfkit'
-import sharp from 'sharp'
+import sharp, { type Metadata as SharpMetadata } from 'sharp'
 import { ulid } from 'ulid'
 import { promisify } from 'util'
 import { mapConcurrent } from '../utils/async'
@@ -417,6 +417,28 @@ function getPathSize(target: string): number {
 
 function normalizeRotation(rotation: number): number {
   return ((Math.round(rotation) % 360) + 360) % 360
+}
+
+interface OrientationOptions {
+  /** True when a RAW container orientation is applied by hand, so sharp must not also auto-orient. */
+  rawOrientationApplied?: boolean
+}
+
+/**
+ * Sharp input options. The webp output drops the EXIF orientation tag, so camera portraits would
+ * come out sideways unless sharp applies it; skip that when the RAW orientation is already applied,
+ * otherwise the image would rotate twice.
+ */
+function orientedSharpOptions({ rawOrientationApplied = false }: OrientationOptions = {}) {
+  return { limitInputPixels: false, autoOrient: !rawOrientationApplied } as const
+}
+
+/** Width and height as displayed: sharp reports the EXIF-oriented size under `autoOrient`. */
+function displayedDimensions(
+  metadata: SharpMetadata,
+  { rawOrientationApplied = false }: OrientationOptions = {},
+): Pick<SharpMetadata, 'width' | 'height'> {
+  return rawOrientationApplied ? metadata : (metadata.autoOrient ?? metadata)
 }
 
 export function parseBitrateKbps(bitrate: string | number): number {
@@ -956,7 +978,7 @@ export class TranscodeService {
 
     const metadata = await sharp(input, { limitInputPixels: false }).metadata()
     // Cameras store portraits sideways plus an EXIF orientation; report the size as displayed.
-    const shown = metadata.autoOrient ?? metadata
+    const shown = displayedDimensions(metadata)
     return {
       originalWidth: shown.width || 0,
       originalHeight: shown.height || 0,
@@ -1944,13 +1966,14 @@ export class TranscodeService {
 
       // RAW previews are oriented from the container EXIF below, so only auto-orient other
       // inputs: the webp output drops the tag, which would leave camera portraits sideways.
-      const autoOrient = rawOrientation === undefined
-      const sharpInstance = sharp(input, { limitInputPixels: false, autoOrient })
+      const rawOrientationApplied = rawOrientation !== undefined
+      const sharpInstance = sharp(input, orientedSharpOptions({ rawOrientationApplied }))
 
       if (isPreview) {
         try {
-          const stored = await sharpInstance.metadata()
-          const meta = autoOrient ? (stored.autoOrient ?? stored) : stored
+          const meta = displayedDimensions(await sharpInstance.metadata(), {
+            rawOrientationApplied,
+          })
           if (meta.width && meta.height) {
             const isSwapped =
               rawOrientation !== undefined && rawOrientation >= 5 && rawOrientation <= 8
@@ -3026,13 +3049,14 @@ export class TranscodeService {
     }
 
     // Annotations are drawn in the displayed (EXIF-oriented) coordinate space.
-    const rawMeta = await sharp(imageBuffer, { limitInputPixels: false }).metadata()
-    const meta = rawMeta.autoOrient ?? rawMeta
+    const meta = displayedDimensions(
+      await sharp(imageBuffer, { limitInputPixels: false }).metadata(),
+    )
     const width = meta.width || 1920
     const height = meta.height || 1080
 
     const svgStr = renderAnnotationsToSvg(width, height, annotations)
-    return await sharp(imageBuffer, { limitInputPixels: false, autoOrient: true })
+    return await sharp(imageBuffer, orientedSharpOptions())
       .composite([{ input: Buffer.from(svgStr), top: 0, left: 0 }])
       .toColorspace('srgb')
       .resize(16383, 16383, { fit: 'inside', withoutEnlargement: true })
@@ -3119,7 +3143,7 @@ export class TranscodeService {
     width: number,
     height: number,
   ): Promise<void> {
-    await sharp(inputPath, { limitInputPixels: false, autoOrient: true })
+    await sharp(inputPath, orientedSharpOptions())
       .toColorspace('srgb')
       .resize(width, height, { fit: 'inside' })
       .composite([{ input: overlayPngBuffer }])
