@@ -17,6 +17,9 @@
 import * as fs from 'fs'
 import * as path from 'path'
 
+/** Largest single read (and so allocation) the parser ever makes: also the largest preview. */
+const MAX_READ_BYTES = 64 * 1024 * 1024
+
 export interface ByteSource {
   /** Exactly `length` bytes at `offset`, or null on a short read or a bad range. */
   read(offset: number, length: number): Buffer | null
@@ -46,6 +49,8 @@ export class FileSource implements ByteSource {
 
   read(offset: number, length: number): Buffer | null {
     if (!rangeOk(this.total, offset, length)) return null
+    // A hostile file can declare any length; never allocate more than a preview may be.
+    if (length > MAX_READ_BYTES) return null
     const buf = Buffer.alloc(length)
     let done = 0
     while (done < length) {
@@ -83,17 +88,11 @@ export interface RawPreviewResult {
   candidates: RawPreview[]
   /**
    * Largest full-resolution IFD size the container declares. For Sony ARW this is the padded
-   * raw buffer (7168x5120), so it bounds preview sizes but is NOT the image size.
+   * raw buffer (7168x5120), so it only bounds preview sizes; it is NOT the size of anything
+   * that gets rendered (see {@link rawImageSize}).
    */
   rawWidth: number
   rawHeight: number
-  /**
-   * The image size the camera declares, before orientation: the EXIF PixelXDimension /
-   * PixelYDimension for TIFF-based RAWs (6224x4672 on the same ARW) and the CFA header's
-   * cropped size for Fujifilm RAF (6240x4160). 0 when the container does not say.
-   */
-  imageWidth: number
-  imageHeight: number
   error?: string
 }
 
@@ -107,6 +106,12 @@ export interface RawPreviewLimits {
   maxSubIfdDepth: number
   minPreviewBytes: number
   maxPreviewBytes: number
+  /** Distinct tag-located candidates kept per file. */
+  maxHits: number
+  /** Candidates examined in total (tags and scan, passes and failures alike). */
+  maxConsiderAttempts: number
+  /** Total bytes the EOI trim may walk back through, across all candidates. */
+  maxEoiScanBytes: number
 }
 
 export const DEFAULT_RAW_PREVIEW_LIMITS: RawPreviewLimits = {
@@ -118,7 +123,10 @@ export const DEFAULT_RAW_PREVIEW_LIMITS: RawPreviewLimits = {
   maxIfdChain: 32,
   maxSubIfdDepth: 4,
   minPreviewBytes: 2048,
-  maxPreviewBytes: 256 * 1024 * 1024,
+  maxPreviewBytes: MAX_READ_BYTES,
+  maxHits: 64,
+  maxConsiderAttempts: 256,
+  maxEoiScanBytes: 128 * 1024 * 1024,
 }
 
 // --- helpers -----------------------------------------------------------------
@@ -160,8 +168,6 @@ const TAG_JPEG_IF_OFFSET = 0x0201
 const TAG_JPEG_IF_LENGTH = 0x0202
 const TAG_SUB_IFDS = 0x014a
 const TAG_EXIF_IFD = 0x8769
-const TAG_PIXEL_X_DIMENSION = 0xa002
-const TAG_PIXEL_Y_DIMENSION = 0xa003
 
 // TIFF field type sizes, indexed by type code (1..13). 0 = unknown.
 const TYPE_SIZE = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 4]
@@ -242,11 +248,19 @@ function findEntry(entries: IfdEntry[], tag: number): IfdEntry | undefined {
 interface WalkState {
   rawWidth: number
   rawHeight: number
-  pixelWidth: number
-  pixelHeight: number
+  /** Container orientation, taken from IFD0 only (1 until {@link orientationSeen}). */
   orientation: number
+  orientationSeen: boolean
   hits: Array<{ offset: number; length: number }>
+  hitOffsets: Set<number>
   visited: Set<number>
+}
+
+/** Record a candidate location once per offset, up to the per-file cap. */
+function addHit(ctx: TiffCtx, st: WalkState, offset: number, length: number): void {
+  if (st.hits.length >= ctx.lim.maxHits || st.hitOffsets.has(offset)) return
+  st.hitOffsets.add(offset)
+  st.hits.push({ offset, length })
 }
 
 function walkIfdChain(ctx: TiffCtx, firstIfd: number, depth: number, st: WalkState): void {
@@ -272,18 +286,13 @@ function walkIfdChain(ctx: TiffCtx, firstIfd: number, depth: number, st: WalkSta
     const h = findEntry(entries, TAG_IMAGE_HEIGHT)
     const hv = h ? entryElement(ctx, h) : null
     if (isFullRes && hv !== null && hv > st.rawHeight) st.rawHeight = hv
-    const o = findEntry(entries, TAG_ORIENTATION)
-    const ov = o ? entryElement(ctx, o) : null
-    if (ov !== null && ov >= 1 && ov <= 8 && st.orientation === 1) st.orientation = ov
-
-    // EXIF IFD: the declared image size (not the padded raw buffer size of IFD0).
-    const px = findEntry(entries, TAG_PIXEL_X_DIMENSION)
-    const pxv = px ? entryElement(ctx, px) : null
-    const py = findEntry(entries, TAG_PIXEL_Y_DIMENSION)
-    const pyv = py ? entryElement(ctx, py) : null
-    if (pxv && pyv && pxv * pyv > st.pixelWidth * st.pixelHeight) {
-      st.pixelWidth = pxv
-      st.pixelHeight = pyv
+    // Orientation belongs to the main image: IFD0 (depth 0, first IFD) only. Later IFDs and
+    // SubIFDs describe thumbnails and raw data and may carry a different value.
+    if (depth === 0 && n === 0 && !st.orientationSeen) {
+      st.orientationSeen = true
+      const o = findEntry(entries, TAG_ORIENTATION)
+      const ov = o ? entryElement(ctx, o) : null
+      if (ov !== null && ov >= 1 && ov <= 8) st.orientation = ov
     }
 
     // JPEGInterchangeFormat pair: the canonical preview location.
@@ -292,16 +301,19 @@ function walkIfdChain(ctx: TiffCtx, firstIfd: number, depth: number, st: WalkSta
     if (jOff && jLen) {
       const off = entryElement(ctx, jOff)
       const len = entryElement(ctx, jLen)
-      if (off !== null && len !== null) st.hits.push({ offset: ctx.base + off, length: len })
+      if (off !== null && len !== null) addHit(ctx, st, ctx.base + off, len)
     }
 
     // A reduced-resolution IFD with JPEG compression (6, 7, or Olympus 99) stores its
-    // preview as a single strip (DNG, NEF, ORF and others).
+    // preview as a single strip (DNG, NEF, ORF and others). A full-resolution IFD's strip is
+    // the sensor data (lossless JPEG in DNG and CR2), so it only counts as a preview in IFD0,
+    // where many formats (CR2 among them) keep their main JPEG.
     const comp = findEntry(entries, TAG_COMPRESSION)
     const compV = comp ? entryElement(ctx, comp) : null
     const sOff = findEntry(entries, TAG_STRIP_OFFSETS)
     const sLen = findEntry(entries, TAG_STRIP_BYTE_COUNTS)
     if (
+      (!isFullRes || (depth === 0 && n === 0)) &&
       (compV === 6 || compV === 7 || compV === 99) &&
       sOff &&
       sLen &&
@@ -310,7 +322,7 @@ function walkIfdChain(ctx: TiffCtx, firstIfd: number, depth: number, st: WalkSta
     ) {
       const off = entryElement(ctx, sOff)
       const len = entryElement(ctx, sLen)
-      if (off !== null && len !== null) st.hits.push({ offset: ctx.base + off, length: len })
+      if (off !== null && len !== null) addHit(ctx, st, ctx.base + off, len)
     }
 
     // A tag whose VALUE is itself a JPEG (Sony 0x2001, Panasonic JpgFromRaw, Olympus
@@ -321,7 +333,7 @@ function walkIfdChain(ctx: TiffCtx, firstIfd: number, depth: number, st: WalkSta
       if (e.count < ctx.lim.minPreviewBytes) continue
       const soi = ctx.src.read(e.valueOffset, 3)
       if (soi && soi[0] === 0xff && soi[1] === 0xd8 && soi[2] === 0xff) {
-        st.hits.push({ offset: e.valueOffset, length: e.count })
+        addHit(ctx, st, e.valueOffset, e.count)
       }
     }
 
@@ -354,19 +366,27 @@ export function parseJpegDimensions(
   offset: number,
   maxLength: number,
 ): { width: number; height: number } | null {
-  const soi = src.read(offset, 3)
-  if (!soi || soi[0] !== 0xff || soi[1] !== 0xd8 || soi[2] !== 0xff) return null
+  const end = Math.min(maxLength > 0 ? offset + maxLength : src.size(), src.size())
+  // The header segments are parsed from one in-memory window (re-read only when a long
+  // segment skips past it), not with a tiny read per marker.
+  let win = readWindow(src, offset, end)
+  if (!win || win.buf.length < 3) return null
+  const soi = win.buf
+  if (soi[0] !== 0xff || soi[1] !== 0xd8 || soi[2] !== 0xff) return null
 
   let p = offset + 2
-  const end = maxLength > 0 ? offset + maxLength : src.size()
   for (let guard = 0; guard < 4096 && p + 4 <= end; guard++) {
-    const b = src.read(p, 4)
-    if (!b) return null
-    if (b[0] !== 0xff) {
+    if (p + 9 > win.start + win.buf.length) {
+      win = readWindow(src, p, end)
+      if (!win || win.buf.length < 4) return null
+    }
+    const at = p - win.start
+    const b = win.buf
+    if (b[at] !== 0xff) {
       p++
       continue
     }
-    const marker = b[1]
+    const marker = b[at + 1]
     if (marker === 0xff) {
       p++
       continue
@@ -376,20 +396,35 @@ export function parseJpegDimensions(
       continue
     }
     if (marker === 0xd9 || marker === 0xda) return null
-    const segLen = b.readUInt16BE(2)
+    const segLen = b.readUInt16BE(at + 2)
     if (segLen < 2) return null
     const isSof =
       marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc
     if (isSof) {
-      const sof = src.read(p + 4, 5)
-      if (!sof) return null
-      const height = sof.readUInt16BE(1)
-      const width = sof.readUInt16BE(3)
+      // SOF3 / 7 / 11 / 15 are lossless: that is raw sensor data, never a preview.
+      if (marker === 0xc3 || marker === 0xc7 || marker === 0xcb || marker === 0xcf) return null
+      if (at + 9 > b.length) return null
+      const height = b.readUInt16BE(at + 5)
+      const width = b.readUInt16BE(at + 7)
       return width > 0 && height > 0 ? { width, height } : null
     }
     p += 2 + segLen
   }
   return null
+}
+
+const HEADER_WINDOW_BYTES = 64 * 1024
+
+/** Up to one header window at `start`, clipped to `end`; null when nothing can be read. */
+function readWindow(
+  src: ByteSource,
+  start: number,
+  end: number,
+): { start: number; buf: Buffer } | null {
+  const len = Math.min(HEADER_WINDOW_BYTES, end - start)
+  if (len <= 0) return null
+  const buf = src.read(start, len)
+  return buf ? { start, buf } : null
 }
 
 /** EXIF orientation (1..8) from a JPEG's own APP1 segment, or null. */
@@ -433,6 +468,9 @@ export function readJpegExifOrientation(
   return null
 }
 
+const EOI_MARKER = Buffer.from([0xff, 0xd9])
+const SOI_MARKER = Buffer.from([0xff, 0xd8, 0xff])
+
 /** Offset just past the last EOI inside [offset, offset+maxLength), or null. */
 export function findJpegEnd(src: ByteSource, offset: number, maxLength: number): number | null {
   const limit = Math.min(maxLength > 0 ? offset + maxLength : src.size(), src.size())
@@ -443,42 +481,10 @@ export function findJpegEnd(src: ByteSource, offset: number, maxLength: number):
     const at = pos - take
     const buf = src.read(at, take)
     if (!buf) return null
-    for (let i = take - 1; i >= 1; i--) {
-      if (buf[i - 1] === 0xff && buf[i] === 0xd9) return at + i + 1
-    }
+    const hit = buf.lastIndexOf(EOI_MARKER)
+    if (hit >= 0) return at + hit + 2
     if (at === offset) break
     pos = at + 1 // overlap one byte so a marker split across chunks is not missed
-  }
-  return null
-}
-
-// --- Fujifilm RAF ------------------------------------------------------------
-
-const RAF_CFA_RAW_IMAGE_CROPPED_SIZE = 0x0111
-
-/**
- * The cropped sensor size from a RAF's CFA header (the file header holds its offset at 0x5C and
- * length at 0x60). Records are big-endian `tag u16, length u16, data`; the cropped size is two
- * u16 values, height then width (4160, 6240 on a 26 MP body).
- */
-function readRafImageSize(src: ByteSource): { width: number; height: number } | null {
-  const off = readU32(src, 0x5c, true)
-  const len = readU32(src, 0x60, true)
-  if (!off || !len || len > 1024 * 1024) return null
-  const cfa = src.read(off, len)
-  if (!cfa || cfa.length < 4) return null
-  const count = Math.min(cfa.readUInt32BE(0), 256)
-  let p = 4
-  for (let i = 0; i < count && p + 4 <= cfa.length; i++) {
-    const tag = cfa.readUInt16BE(p)
-    const size = cfa.readUInt16BE(p + 2)
-    if (p + 4 + size > cfa.length) return null
-    if (tag === RAF_CFA_RAW_IMAGE_CROPPED_SIZE && size === 4) {
-      const height = cfa.readUInt16BE(p + 4)
-      const width = cfa.readUInt16BE(p + 6)
-      return width > 0 && height > 0 ? { width, height } : null
-    }
-    p += 4 + size
   }
   return null
 }
@@ -517,6 +523,7 @@ export function detectRawFormat(src: ByteSource, filename = ''): RawFormat {
 function consider(
   src: ByteSource,
   lim: RawPreviewLimits,
+  budget: Budget,
   offset: number,
   length: number,
   fromTag: boolean,
@@ -524,6 +531,11 @@ function consider(
   rawHeight: number,
   out: RawPreview[],
 ): void {
+  // Every attempt counts, pass or fail, so a hostile file cannot make us examine endless
+  // candidates.
+  if (budget.attempts <= 0) return
+  budget.attempts--
+
   if (!rangeOk(src.size(), offset, length)) return
   if (length < lim.minPreviewBytes) return
 
@@ -541,31 +553,45 @@ function consider(
     if (width > (rawWidth * 11) / 10 && height > (rawHeight * 11) / 10) return
   }
 
-  // Trim padding the declared length included. Fast path: already ends on EOI.
-  let useLength = length
-  const tail = src.read(offset + length - 2, 2)
-  if (!(tail && tail[0] === 0xff && tail[1] === 0xd9)) {
-    const end = findJpegEnd(src, offset, length)
-    if (end !== null && end > offset) useLength = end - offset
-  }
-
   // A compressed JPEG cannot plausibly exceed its own uncompressed RGB size. Real Sony ARWs
   // declare a 256x256 preview with a 35 MB length; without this bound a thumbnail request
-  // would read 35 MB.
+  // would read 35 MB. Computed up front so the EOI search never walks more than that.
   const maxPlausible = width * height * 3 + 64 * 1024
-  if (useLength > maxPlausible) {
-    const end = findJpegEnd(src, offset, maxPlausible)
+  let useLength = length
+  if (length > maxPlausible || length > lim.maxPreviewBytes) {
+    const window = Math.min(length, maxPlausible, lim.maxPreviewBytes)
+    if (budget.eoiBytes < window) return
+    budget.eoiBytes -= window
+    const end = findJpegEnd(src, offset, window)
     if (end === null || end <= offset) return
     useLength = end - offset
+  } else {
+    // Trim padding the declared length included. Fast path: already ends on EOI.
+    const tail = src.read(offset + length - 2, 2)
+    if (!(tail && tail[0] === 0xff && tail[1] === 0xd9)) {
+      if (budget.eoiBytes < length) return
+      budget.eoiBytes -= length
+      const end = findJpegEnd(src, offset, length)
+      if (end !== null && end > offset) useLength = end - offset
+    }
   }
 
   out.push({ offset, length: useLength, width, height, orientation: 1, fromTag })
+}
+
+/** Work left for one findRawPreviews call, shared by the tag hits and the scan. */
+interface Budget {
+  /** Candidates still allowed to be examined. */
+  attempts: number
+  /** Bytes the EOI trim may still walk back through. */
+  eoiBytes: number
 }
 
 /** Last resort: scan for SOI markers. Only used when the container tags yielded nothing. */
 function scanForJpegs(
   src: ByteSource,
   lim: RawPreviewLimits,
+  budget: Budget,
   rawWidth: number,
   rawHeight: number,
   out: RawPreview[],
@@ -574,17 +600,20 @@ function scanForJpegs(
   const cap = Math.min(total, lim.maxScanBytes)
   const chunk = 1 << 20
   let pos = 0
-  while (pos < cap && out.length < 64) {
+  while (pos < cap && out.length < 64 && budget.attempts > 0) {
     const take = Math.min(chunk + 3, cap - pos)
     const buf = src.read(pos, take)
     if (!buf) break
-    for (let i = 0; i + 2 < take; i++) {
-      if (buf[i] === 0xff && buf[i + 1] === 0xd8 && buf[i + 2] === 0xff) {
-        consider(src, lim, pos + i, total - (pos + i), false, rawWidth, rawHeight, out)
-      }
+    let from = 0
+    while (budget.attempts > 0 && out.length < 64) {
+      const i = buf.indexOf(SOI_MARKER, from)
+      if (i < 0) break
+      consider(src, lim, budget, pos + i, total - (pos + i), false, rawWidth, rawHeight, out)
+      from = i + 1
     }
     if (take <= 3) break
-    pos += take - 3 // overlap so a marker split across chunks is still seen
+    // Overlap by 2 so a marker split across chunks is seen once, in the next chunk.
+    pos += take - 2
   }
 }
 
@@ -600,17 +629,19 @@ export function findRawPreviews(
     candidates: [],
     rawWidth: 0,
     rawHeight: 0,
-    imageWidth: 0,
-    imageHeight: 0,
   }
   const st: WalkState = {
     rawWidth: 0,
     rawHeight: 0,
-    pixelWidth: 0,
-    pixelHeight: 0,
     orientation: 1,
+    orientationSeen: false,
     hits: [],
+    hitOffsets: new Set<number>(),
     visited: new Set<number>(),
+  }
+  const budget: Budget = {
+    attempts: limits.maxConsiderAttempts,
+    eoiBytes: limits.maxEoiScanBytes,
   }
 
   if (format === 'bigtiff') {
@@ -624,11 +655,6 @@ export function findRawPreviews(
     const off = readU32(src, 0x54, true)
     const len = readU32(src, 0x58, true)
     if (off && len) st.hits.push({ offset: off, length: len })
-    const size = readRafImageSize(src)
-    if (size) {
-      result.imageWidth = size.width
-      result.imageHeight = size.height
-    }
   } else if (format === 'tiff') {
     const h = src.read(0, 8)
     if (h) {
@@ -641,15 +667,12 @@ export function findRawPreviews(
 
   result.rawWidth = st.rawWidth
   result.rawHeight = st.rawHeight
-  if (st.pixelWidth > 0 && st.pixelHeight > 0) {
-    result.imageWidth = st.pixelWidth
-    result.imageHeight = st.pixelHeight
-  }
 
   for (const hit of st.hits) {
     consider(
       src,
       limits,
+      budget,
       hit.offset,
       hit.length,
       true,
@@ -660,7 +683,7 @@ export function findRawPreviews(
   }
   // Scanning is where phantoms come from, so it never competes with a tag-located preview.
   if (result.candidates.length === 0) {
-    scanForJpegs(src, limits, st.rawWidth, st.rawHeight, result.candidates)
+    scanForJpegs(src, limits, budget, st.rawWidth, st.rawHeight, result.candidates)
   }
   if (result.candidates.length === 0) {
     result.error = 'no valid embedded JPEG preview found'
@@ -780,33 +803,16 @@ export function extractRawPreviewFromFile(
   }
 }
 
-/** Largest preview's displayed dimensions, or null when there is no usable preview. */
-export function getRawPreviewSizeFromFile(
-  filePath: string,
-): { width: number; height: number } | null {
-  const fd = fs.openSync(filePath, 'r')
-  try {
-    const best = largestPreview(findRawPreviews(new FileSource(fd), filePath))
-    return best ? orientedSize(best) : null
-  } finally {
-    fs.closeSync(fd)
-  }
-}
-
 /**
- * The asset's displayed size: the declared image size when the container has one, otherwise the
- * largest preview, with the orientation applied. Null when the file has no usable preview (so
- * the caller falls back to a full decode).
+ * The asset's displayed size: the size of the image that actually gets rendered, which is the
+ * largest embedded preview with its orientation applied. It is deliberately NOT the sensor size
+ * (the transcode spec, output keys, watermark and viewer boxes must all agree with the real
+ * file, and nothing is ever rendered at sensor size). Null when the file has no usable preview
+ * (so the caller falls back to a full decode).
  */
 export function rawImageSize(result: RawPreviewResult): { width: number; height: number } | null {
   const best = largestPreview(result)
-  if (!best) return null
-  const declared = result.imageWidth > 0 && result.imageHeight > 0
-  const width = declared ? result.imageWidth : best.width
-  const height = declared ? result.imageHeight : best.height
-  return best.orientation >= 5 && best.orientation <= 8
-    ? { width: height, height: width }
-    : { width, height }
+  return best ? orientedSize(best) : null
 }
 
 /** {@link rawImageSize} for a RAW file on disk. Reads only the headers. */

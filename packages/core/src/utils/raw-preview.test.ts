@@ -5,6 +5,7 @@ import * as path from 'path'
 import sharp from 'sharp'
 import {
   BufferSource,
+  DEFAULT_RAW_PREVIEW_LIMITS,
   choosePreviewForSize,
   detectRawFormat,
   extractRawPreviewFromFile,
@@ -12,7 +13,6 @@ import {
   extractRawPreviewFromBuffer,
   getRawImageSizeFromBuffer,
   getRawImageSizeFromFile,
-  getRawPreviewSizeFromFile,
   largestPreview,
   orientedSize,
   parseJpegDimensions,
@@ -68,7 +68,7 @@ function preview(width: number, height: number, extra: Partial<RawPreview> = {})
 }
 
 function result(candidates: RawPreview[]): RawPreviewResult {
-  return { format: 'tiff', candidates, rawWidth: 0, rawHeight: 0, imageWidth: 0, imageHeight: 0 }
+  return { format: 'tiff', candidates, rawWidth: 0, rawHeight: 0 }
 }
 
 describe('JPEG header parsing', () => {
@@ -324,7 +324,7 @@ describe('file helpers', () => {
 
   it('reports the displayed (oriented) size of the largest preview', () => {
     const p = write('a.ARW', sonyLikeArw({ orientation: 6 }).file)
-    expect(getRawPreviewSizeFromFile(p)).toEqual({ width: 1000, height: 1500 })
+    expect(getRawImageSizeFromFile(p)).toEqual({ width: 1000, height: 1500 })
   })
 
   it('chooses the small preview for a thumbnail and the big one for full size', () => {
@@ -340,13 +340,13 @@ describe('file helpers', () => {
       fakeTiff([{ entries: [{ tag: TAG.imageWidth, type: 4, value: 6000 }], next: null }], []),
     )
     expect(extractRawPreviewFromFile(p, 300)).toBeNull()
-    expect(getRawPreviewSizeFromFile(p)).toBeNull()
+    expect(getRawImageSizeFromFile(p)).toBeNull()
   })
 })
 
-describe('declared image size (real dimensions, not the container size)', () => {
+describe('rendered size (the largest embedded preview, not the sensor size)', () => {
   /** Sony-style ARW whose IFD0 carries the padded raw buffer size, not the image size. */
-  function arwWithExifSize(orientation = 1) {
+  function arwWithPaddedRawSize(orientation = 1) {
     const big = fakeJpeg(1500, 1000)
     const file = fakeTiff(
       [
@@ -357,14 +357,6 @@ describe('declared image size (real dimensions, not the container size)', () => 
             { tag: TAG.orientation, type: 3, value: orientation },
             { tag: TAG.jpegIfOffset, type: 4, value: { blob: 0 } },
             { tag: TAG.jpegIfLength, type: 4, value: { blobLen: 0 } },
-            { tag: TAG.exifIfd, type: 4, value: { ifd: 1 } },
-          ],
-          next: null,
-        },
-        {
-          entries: [
-            { tag: TAG.pixelDimensionX, type: 4, value: 1500 },
-            { tag: TAG.pixelDimensionY, type: 4, value: 1000 },
           ],
           next: null,
         },
@@ -374,36 +366,33 @@ describe('declared image size (real dimensions, not the container size)', () => 
     return { file, big }
   }
 
-  it('prefers the EXIF pixel dimensions over the padded IFD0 size (Sony ARW)', () => {
-    const r = findRawPreviews(src(arwWithExifSize().file), 'a.ARW')
+  it('reports the preview size, never the padded raw buffer size (Sony ARW)', () => {
+    const r = findRawPreviews(src(arwWithPaddedRawSize().file), 'a.ARW')
     expect(r.rawWidth).toBe(1792)
     expect(r.rawHeight).toBe(1280)
-    expect([r.imageWidth, r.imageHeight]).toEqual([1500, 1000])
-    expect(getRawImageSizeFromBuffer(arwWithExifSize().file, 'a.ARW')).toEqual({
+    expect(getRawImageSizeFromBuffer(arwWithPaddedRawSize().file, 'a.ARW')).toEqual({
       width: 1500,
       height: 1000,
     })
   })
 
-  it('applies the orientation to the declared size', () => {
-    expect(getRawImageSizeFromBuffer(arwWithExifSize(6).file, 'a.ARW')).toEqual({
+  it('applies the orientation to the preview size', () => {
+    expect(getRawImageSizeFromBuffer(arwWithPaddedRawSize(6).file, 'a.ARW')).toEqual({
       width: 1000,
       height: 1500,
     })
   })
 
-  it('reads the cropped sensor size from the RAF CFA header, not the preview size', () => {
+  it('reports the preview size for a RAF, oriented by the preview EXIF', () => {
     const jpeg = fakeJpeg(4416, 2944, { orientation: 8 })
-    const raf = fakeRaf(jpeg, 64, { width: 6240, height: 4160 })
-    const r = findRawPreviews(src(raf), 'DSCF1153.RAF')
-    expect([r.imageWidth, r.imageHeight]).toEqual([6240, 4160])
-    // Orientation 8 (from the preview's EXIF) turns it upright.
-    expect(getRawImageSizeFromBuffer(raf, 'DSCF1153.RAF')).toEqual({ width: 4160, height: 6240 })
-  })
-
-  it('falls back to the largest preview when the container declares no size', () => {
-    const jpeg = fakeJpeg(4416, 2944)
-    expect(getRawImageSizeFromBuffer(fakeRaf(jpeg), 'a.RAF')).toEqual({ width: 4416, height: 2944 })
+    expect(getRawImageSizeFromBuffer(fakeRaf(jpeg), 'DSCF1153.RAF')).toEqual({
+      width: 2944,
+      height: 4416,
+    })
+    expect(getRawImageSizeFromBuffer(fakeRaf(fakeJpeg(4416, 2944)), 'a.RAF')).toEqual({
+      width: 4416,
+      height: 2944,
+    })
   })
 
   it('returns null for a RAW without a usable preview', () => {
@@ -414,11 +403,185 @@ describe('declared image size (real dimensions, not the container size)', () => 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'raw-preview-size-'))
     try {
       const p = path.join(dir, 'a.ARW')
-      fs.writeFileSync(p, arwWithExifSize().file)
+      fs.writeFileSync(p, arwWithPaddedRawSize().file)
       expect(getRawImageSizeFromFile(p)).toEqual({ width: 1500, height: 1000 })
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('raw sensor data is never taken for a preview', () => {
+  /** IFD0 with a good preview, plus a SubIFD holding a single strip. */
+  function withSensorStrip(strip: Buffer, subfileType: number) {
+    return fakeTiff(
+      [
+        {
+          entries: [
+            { tag: TAG.imageWidth, type: 4, value: 6000 },
+            { tag: TAG.imageHeight, type: 4, value: 4000 },
+            { tag: TAG.jpegIfOffset, type: 4, value: { blob: 0 } },
+            { tag: TAG.jpegIfLength, type: 4, value: { blobLen: 0 } },
+            { tag: TAG.subIfds, type: 13, value: { ifd: 1 } },
+          ],
+          next: null,
+        },
+        {
+          entries: [
+            { tag: TAG.newSubfileType, type: 4, value: subfileType },
+            { tag: TAG.compression, type: 3, value: 7 },
+            { tag: TAG.stripOffsets, type: 4, value: { blob: 1 } },
+            { tag: TAG.stripByteCounts, type: 4, value: { blobLen: 1 } },
+          ],
+          next: null,
+        },
+      ],
+      [fakeJpeg(1500, 1000), strip],
+    )
+  }
+
+  it('rejects lossless JPEG (SOF3, 7, 11, 15) in parseJpegDimensions', () => {
+    for (const sofMarker of [0xc3, 0xc7, 0xcb, 0xcf]) {
+      expect(parseJpegDimensions(src(fakeJpeg(1024, 683, { sofMarker })), 0, 0)).toBeNull()
+    }
+    expect(parseJpegDimensions(src(fakeJpeg(1024, 683, { sofMarker: 0xc2 })), 0, 0)).toEqual({
+      width: 1024,
+      height: 683,
+    })
+  })
+
+  it('does not choose a lossless raw strip', () => {
+    const lossless = fakeJpeg(5000, 3300, { sofMarker: 0xc3, minBytes: 8192 })
+    for (const subfileType of [0, 1]) {
+      const r = findRawPreviews(src(withSensorStrip(lossless, subfileType)), 'a.dng')
+      expect(r.candidates.map((c) => [c.width, c.height])).toEqual([[1500, 1000]])
+    }
+  })
+
+  it('ignores a strip in a full-resolution IFD even when it is baseline JPEG', () => {
+    const strip = fakeJpeg(5000, 3300, { minBytes: 8192 })
+    const full = findRawPreviews(src(withSensorStrip(strip, 0)), 'a.dng')
+    expect(full.candidates.map((c) => [c.width, c.height])).toEqual([[1500, 1000]])
+    // The same strip in a reduced-resolution IFD is a legitimate preview.
+    const reduced = findRawPreviews(src(withSensorStrip(strip, 1)), 'a.dng')
+    expect(reduced.candidates.map((c) => [c.width, c.height])).toContainEqual([5000, 3300])
+  })
+})
+
+describe('container orientation', () => {
+  function orientations(ifd0: number | null, ifd1: number | null, sub: number | null = null) {
+    const ori = (v: number | null) =>
+      v === null ? [] : [{ tag: TAG.orientation, type: 3 as const, value: v }]
+    const file = fakeTiff(
+      [
+        {
+          entries: [
+            ...ori(ifd0),
+            { tag: TAG.jpegIfOffset, type: 4, value: { blob: 0 } },
+            { tag: TAG.jpegIfLength, type: 4, value: { blobLen: 0 } },
+            ...(sub === null ? [] : [{ tag: TAG.subIfds, type: 13 as const, value: { ifd: 2 } }]),
+          ],
+          next: 1,
+        },
+        { entries: [...ori(ifd1), { tag: TAG.newSubfileType, type: 4, value: 1 }], next: null },
+        { entries: [...ori(sub), { tag: TAG.newSubfileType, type: 4, value: 1 }], next: null },
+      ],
+      [fakeJpeg(1500, 1000)],
+    )
+    return findRawPreviews(src(file), 'a.ARW').candidates[0].orientation
+  }
+
+  it('takes the orientation from IFD0 only, not from a later IFD or a SubIFD', () => {
+    expect(orientations(1, 6)).toBe(1)
+    expect(orientations(1, 6, 8)).toBe(1)
+    expect(orientations(3, 6, 8)).toBe(3)
+  })
+
+  it('does not adopt a later IFD when IFD0 says nothing', () => {
+    expect(orientations(null, 6)).toBe(1)
+  })
+})
+
+describe('hostile input stays cheap', () => {
+  const BUDGET_MS = 500
+
+  /**
+   * A TIFF with one IFD of `entries` large UNDEFINED values, each pointing at a blob that starts
+   * with `body`. `distinct` false makes every entry point at the same blob.
+   */
+  function manyHitTiff(entries: number, distinct: boolean, body: Buffer): Buffer {
+    const blobLen = 2200
+    const tableEnd = 8 + 2 + entries * 12 + 4
+    const out = Buffer.alloc(tableEnd + (distinct ? entries : 1) * blobLen)
+    out.write('II', 0, 'latin1')
+    out.writeUInt16LE(42, 2)
+    out.writeUInt32LE(8, 4)
+    out.writeUInt16LE(entries, 8)
+    for (let k = 0; k < entries; k++) {
+      const at = 10 + k * 12
+      const blobAt = tableEnd + (distinct ? k : 0) * blobLen
+      out.writeUInt16LE(0xc000 + k, at)
+      out.writeUInt16LE(7, at + 2)
+      out.writeUInt32LE(blobLen, at + 4)
+      out.writeUInt32LE(blobAt, at + 8)
+      if (k === 0 || distinct) body.copy(out, blobAt)
+    }
+    return out
+  }
+
+  /** SOI, a SOF0 claiming 64000x64000 and no EOI: passes every cheap check. */
+  const hugeSof = Buffer.from([
+    0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xc0, 0x00, 0x11, 0x08, 0xfa, 0x00, 0xfa, 0x00, 0x03,
+  ])
+  const noise = Buffer.from([0xff, 0xd8, 0xff, 0x00, 0x00, 0x00])
+
+  it('examines a buffer of nothing but SOI markers within budget', () => {
+    const data = Buffer.alloc(32 * 1024 * 1024).fill(Buffer.from([0xff, 0xd8, 0xff]))
+    const t0 = performance.now()
+    const r = findRawPreviews(src(data), 'a.ARW')
+    expect(performance.now() - t0).toBeLessThan(BUDGET_MS)
+    expect(r.candidates.length).toBeLessThanOrEqual(64)
+  })
+
+  it('caps the candidates a TIFF with hundreds of preview-like tags can produce', () => {
+    const t0 = performance.now()
+    const r = findRawPreviews(src(manyHitTiff(500, true, hugeSof)), 'a.ARW')
+    expect(performance.now() - t0).toBeLessThan(BUDGET_MS)
+    expect(r.candidates.length).toBeGreaterThan(0)
+    expect(r.candidates.length).toBeLessThanOrEqual(DEFAULT_RAW_PREVIEW_LIMITS.maxHits)
+  })
+
+  it('collapses tags that all point at the same offset into one candidate', () => {
+    const r = findRawPreviews(src(manyHitTiff(500, false, hugeSof)), 'a.ARW')
+    expect(r.candidates).toHaveLength(1)
+  })
+
+  it('still returns the single valid preview among hundreds of decoys', () => {
+    const decoys = manyHitTiff(400, true, noise)
+    const good = fakeJpeg(1500, 1000)
+    // Put the real preview at the end of the file and point the first entry at it.
+    const file = Buffer.concat([decoys, good])
+    file.writeUInt32LE(decoys.length, 10 + 8)
+    file.writeUInt32LE(good.length, 10 + 4)
+    const t0 = performance.now()
+    const r = findRawPreviews(src(file), 'a.ARW')
+    expect(performance.now() - t0).toBeLessThan(BUDGET_MS)
+    expect(r.candidates.map((c) => [c.width, c.height])).toEqual([[1500, 1000]])
+  })
+
+  it('counts failed attempts toward the cap when scanning', () => {
+    // 5000 SOI markers that all fail validation, then a real JPEG far past the 256th.
+    const junk = Buffer.alloc(5000 * 8)
+    for (let i = 0; i < 5000; i++) noise.copy(junk, i * 8)
+    const file = Buffer.concat([
+      fakeTiff([{ entries: [{ tag: TAG.imageWidth, type: 4, value: 6000 }], next: null }], []),
+      junk,
+      fakeJpeg(1200, 800),
+    ])
+    const t0 = performance.now()
+    const r = findRawPreviews(src(file), 'a.ARW')
+    expect(performance.now() - t0).toBeLessThan(BUDGET_MS)
+    expect(r.candidates).toHaveLength(0)
   })
 })
 

@@ -12,7 +12,7 @@
 export function fakeJpeg(
   width: number,
   height: number,
-  opts: { orientation?: number; minBytes?: number } = {},
+  opts: { orientation?: number; minBytes?: number; sofMarker?: number } = {},
 ): Buffer {
   const parts: Buffer[] = [Buffer.from([0xff, 0xd8])]
 
@@ -34,9 +34,9 @@ export function fakeJpeg(
     parts.push(seg, body)
   }
 
-  // SOF0: length 17, precision 8, height, width, 3 components.
+  // SOF0 (or `sofMarker`): length 17, precision 8, height, width, 3 components.
   const sof = Buffer.alloc(19)
-  sof.writeUInt16BE(0xffc0, 0)
+  sof.writeUInt16BE(0xff00 | (opts.sofMarker ?? 0xc0), 0)
   sof.writeUInt16BE(17, 2)
   sof[4] = 8
   sof.writeUInt16BE(height, 5)
@@ -58,37 +58,14 @@ export function fakeJpeg(
   return Buffer.concat(parts)
 }
 
-/**
- * A Fujifilm RAF: magic, big-endian JPEG offset at 0x54 and length at 0x58, then the JPEG. With
- * `cropped`, a CFA header follows the JPEG (offset at 0x5C, length at 0x60) carrying the full
- * and cropped sensor sizes, each stored height first.
- */
-export function fakeRaf(
-  jpeg: Buffer,
-  trailing = 1024,
-  cropped?: { width: number; height: number },
-): Buffer {
+/** A Fujifilm RAF: magic, big-endian JPEG offset at 0x54 and length at 0x58, then the JPEG. */
+export function fakeRaf(jpeg: Buffer, trailing = 1024): Buffer {
   const headerLen = 0x100
   const out = Buffer.alloc(headerLen + jpeg.length + trailing)
   out.write('FUJIFILMCCD-RAW 0201FF383501', 0, 'latin1')
   out.writeUInt32BE(headerLen, 0x54)
   out.writeUInt32BE(jpeg.length, 0x58)
   jpeg.copy(out, headerLen)
-  if (cropped) {
-    const cfaAt = headerLen + jpeg.length
-    out.writeUInt32BE(cfaAt, 0x5c)
-    out.writeUInt32BE(4 + 8 + 8, 0x60)
-    out.writeUInt32BE(2, cfaAt)
-    // RawImageFullSize (0x100) is a little larger than the cropped size, as on real bodies.
-    out.writeUInt16BE(0x100, cfaAt + 4)
-    out.writeUInt16BE(4, cfaAt + 6)
-    out.writeUInt16BE(cropped.height + 22, cfaAt + 8)
-    out.writeUInt16BE(cropped.width + 96, cfaAt + 10)
-    out.writeUInt16BE(0x111, cfaAt + 12)
-    out.writeUInt16BE(4, cfaAt + 14)
-    out.writeUInt16BE(cropped.height, cfaAt + 16)
-    out.writeUInt16BE(cropped.width, cfaAt + 18)
-  }
   return out
 }
 
@@ -175,6 +152,4 @@ export const TAG = {
   jpegIfOffset: 0x0201,
   jpegIfLength: 0x0202,
   exifIfd: 0x8769,
-  pixelDimensionX: 0xa002,
-  pixelDimensionY: 0xa003,
 } as const

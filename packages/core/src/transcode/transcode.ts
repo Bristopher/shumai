@@ -2005,6 +2005,8 @@ export class TranscodeService {
     if (width === 480 || height === 0) {
       isPreview = true
     }
+    // Same shim: a legacy caller passing width=480 means the 300px short side.
+    const targetShort = width === 480 ? 300 : width
 
     let input: string | Buffer = inputFile
     if (typeof inputFile === 'string' && inputFile.startsWith('http')) {
@@ -2023,7 +2025,7 @@ export class TranscodeService {
     if (rawName) {
       // Longest edge the output can reach, so the smallest preview that covers it is chosen.
       const edge = isPreview
-        ? Math.round(((width === 480 ? 300 : width) * 16) / 9)
+        ? Math.round((targetShort * 16) / 9)
         : height && height > 0
           ? Math.max(width, height)
           : 7680
@@ -2059,8 +2061,6 @@ export class TranscodeService {
               rawOrientation !== undefined && rawOrientation >= 5 && rawOrientation <= 8
             const srcW = isSwapped ? meta.height : meta.width
             const srcH = isSwapped ? meta.width : meta.height
-            // Fallback shim: If legacy 480 caller passed width=480, map targetShort to 300
-            const targetShort = width === 480 ? 300 : width
             const maxLong = Math.round((targetShort * 16) / 9)
             const dims = calculatePreviewDimensions(srcW, srcH, targetShort, maxLong)
             targetW = dims.width

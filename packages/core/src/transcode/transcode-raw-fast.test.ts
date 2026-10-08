@@ -6,6 +6,14 @@ import sharp from 'sharp'
 import { transcodeService } from './transcode'
 import { fakeRaf } from '../utils/raw-preview.test-helpers'
 
+// The fallback chain would start a real exiftool process (which keeps vitest from exiting), so
+// the extractor is stubbed: the fast path never reaches it, and the unreadable case gets "no
+// preview", which is what exiftool answers for a file full of zeros.
+vi.mock('./raw-extract', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./raw-extract')>()),
+  extractAndValidateRawPreview: vi.fn().mockResolvedValue(null),
+}))
+
 // Real sharp and a real (synthetic) RAF: exercises the embedded-preview fast path end to end
 // for a local path, a Buffer and a URL, none of which needs exiftool or dcraw_emu.
 
@@ -101,5 +109,5 @@ describe('RAW fast preview path', () => {
     fs.writeFileSync(bad, Buffer.alloc(4096))
     const info = await transcodeService.getImageInfo(bad)
     expect([info.originalWidth, info.originalHeight]).toEqual([0, 0])
-  }, 30_000)
+  })
 })

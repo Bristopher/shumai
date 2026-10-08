@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 * **kanban**: Related assets on a task are now clickable, taking you directly to that file or folder in its project
 
 ### Fixed
-* **transcode**: Fix Sony ARW photos being recorded at the size of the raw sensor buffer instead of their real image size, and RAW photos opened from a link or from memory failing to generate previews
+* **transcode**: Fix Sony ARW photos being recorded at the size of the padded raw sensor buffer instead of the size of the image that is shown, and RAW photos opened from a link or from memory failing to generate previews
 
 ### Changed
 
