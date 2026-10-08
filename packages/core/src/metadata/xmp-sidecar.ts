@@ -84,9 +84,19 @@ export function xmpFromTags(
 }
 
 /**
+ * Whether ExifTool read the file as an XMP document. ExifTool detects the format by content, so a
+ * JPEG or video renamed to `.xmp` reports its real type and its embedded tags must not be taken
+ * as sidecar values.
+ */
+export function isXmpFileTags(tags: Pick<Tags, 'FileType' | 'MIMEType'>): boolean {
+  return tags.FileType === 'XMP' || tags.MIMEType === 'application/rdf+xml'
+}
+
+/**
  * Read a sidecar's content. Never throws: malformed or unreadable XML gives null. ExifTool's XMP
  * reader does not resolve entities or DTDs, so a hostile file cannot read local files or expand
  * entities. The content is written to a private temporary file because ExifTool reads paths.
+ * A file that is not really XMP (a JPEG renamed to .xmp) gives null.
  */
 export async function parseXmpSidecar(data: Buffer | string): Promise<XmpSidecar | null> {
   const buffer = typeof data === 'string' ? Buffer.from(data, 'utf8') : data
@@ -98,6 +108,7 @@ export async function parseXmpSidecar(data: Buffer | string): Promise<XmpSidecar
     await writeFile(file, buffer)
     const timeoutMs = Number(process.env.EXIFTOOL_TIMEOUT_MS) || DEFAULT_EXIFTOOL_TIMEOUT_MS
     const tags = await withTimeout(exiftool.read(file), timeoutMs, 'exiftool.read')
+    if (!isXmpFileTags(tags)) return null
     return xmpFromTags(tags)
   } catch (err) {
     logger.warn({ err }, 'Failed to read XMP sidecar')
@@ -108,8 +119,12 @@ export async function parseXmpSidecar(data: Buffer | string): Promise<XmpSidecar
 }
 
 /**
- * The metadata updates for a sidecar. Fields the sidecar does not set are written as null, so a
- * re-synced sidecar that dropped its label or keywords clears them. Pass null to clear everything.
+ * The metadata updates for a sidecar. A field the sidecar does not set has the value null, which
+ * the sync turns into deleting that field's row (never an all-null row), so a re-synced sidecar
+ * that dropped its label or keywords clears them. Pass null to clear everything.
+ *
+ * Keywords are stored comma-joined in one text value. A keyword that itself holds a comma is
+ * indistinguishable from two keywords in that value; the original list stays in the sidecar.
  */
 export function xmpMetadataUpdates(xmp: XmpSidecar | null): MetadataUpdate[] {
   return [

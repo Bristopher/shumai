@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  isXmpFileTags,
   isXmpSidecarName,
   pairSidecars,
   parseXmpSidecar,
@@ -121,6 +122,25 @@ describe('parseXmpSidecar', () => {
     expect(await parseXmpSidecar(NO_FIELDS_XMP)).toBeNull()
   })
 
+  it('ignores a JPEG renamed to .xmp even when it carries an XMP rating', async () => {
+    // A minimal JPEG whose APP1 segment holds an XMP packet with a rating and a label.
+    const packet = Buffer.from(
+      `<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>${DARKTABLE_XMP}<?xpacket end="w"?>`,
+      'utf8',
+    )
+    const header = Buffer.from('http://ns.adobe.com/xap/1.0/\0', 'latin1')
+    const length = Buffer.alloc(2)
+    length.writeUInt16BE(2 + header.length + packet.length)
+    const jpeg = Buffer.concat([
+      Buffer.from([0xff, 0xd8, 0xff, 0xe1]),
+      length,
+      header,
+      packet,
+      Buffer.from([0xff, 0xd9]),
+    ])
+    expect(await parseXmpSidecar(jpeg)).toBeNull()
+  })
+
   it('returns null for malformed XML without throwing', async () => {
     expect(await parseXmpSidecar('<x:xmpmeta><rdf:RDF><rdf:Description xmp:Rating="4"')).toBeNull()
     expect(await parseXmpSidecar('this is not xml at all \u0000\u0001')).toBeNull()
@@ -169,6 +189,17 @@ ${doctype}
       expect(xmp?.rating).toBe(3)
       expect(xmp?.label).toBe('&d;')
     })
+  })
+})
+
+describe('isXmpFileTags', () => {
+  it('accepts an XMP file by its type or MIME type only', () => {
+    expect(isXmpFileTags({ FileType: 'XMP' })).toBe(true)
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    expect(isXmpFileTags({ MIMEType: 'application/rdf+xml' })).toBe(true)
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    expect(isXmpFileTags({ FileType: 'JPEG', MIMEType: 'image/jpeg' })).toBe(false)
+    expect(isXmpFileTags({})).toBe(false)
   })
 })
 

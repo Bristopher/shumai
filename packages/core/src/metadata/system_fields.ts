@@ -214,6 +214,7 @@ export const systemFields: Prisma.MetadataFieldCreateInput[] = [
     readOnly: true,
     config: { name: 'XMP Color Label', type: 'text', text: {} },
   },
+  // Keywords are comma-joined into one text value, so a keyword that holds a comma reads as two.
   {
     key: 'xmp_keywords',
     scope: 'SYSTEM',

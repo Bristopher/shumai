@@ -22,7 +22,7 @@ import { sanitizeFilename } from '@shumai/core/src/utils/filename'
 import { getProxyType, isHtmlDocument, isOfficeDocument } from '@shumai/core/src/utils/mime'
 import { logger } from '@shumai/core/src/logger'
 import { isXmpSidecarName } from '@shumai/core/src/metadata/xmp-sidecar'
-import { trySyncXmpSidecars } from '@shumai/core/src/metadata/xmp-sidecar-sync'
+import { syncXmpSidecarsAfterCommit } from '@shumai/core/src/metadata/xmp-sidecar-sync'
 
 export class UploadService {
   constructor(private readonly prismaClient: typeof prisma = prisma) {}
@@ -299,6 +299,10 @@ export class UploadService {
 
       await this.triggerPostUploadWorkflows(tx, asset.id, team.id, asset.projectId)
     })
+
+    // A sidecar carries the rating, label and keywords of the photo next to it. Read it after the
+    // commit: it needs storage and ExifTool, which must not run inside the transaction.
+    if (isXmpSidecarName(asset.name)) syncXmpSidecarsAfterCommit(asset.id)
   }
 
   async triggerPostUploadWorkflows(
@@ -316,9 +320,6 @@ export class UploadService {
       where: { id: teamId },
     })
     if (!team) throw new Error('Team not found')
-
-    // A sidecar carries the rating, label and keywords of the photo next to it.
-    if (isXmpSidecarName(asset.name)) await trySyncXmpSidecars(asset.id, tx)
 
     const proxyType =
       (asset.media as PrismaJson.MediaInfo | null)?.proxyType ||

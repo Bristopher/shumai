@@ -3,7 +3,7 @@
  * Call `syncXmpSidecars` with a media file or a sidecar: it re-reads every sidecar that can belong
  * to files with the same name stem in that folder and writes, or clears, the values.
  */
-import { AssetType, Prisma, prisma } from '@shumai/db'
+import { AssetType, prisma } from '@shumai/db'
 import { logger } from '../logger'
 import { s3Service } from '../s3/s3'
 import { metadataService } from './metadata'
@@ -18,22 +18,24 @@ import {
   type XmpSidecar,
 } from './xmp-sidecar'
 
-type Client = Prisma.TransactionClient | typeof prisma
-
+/**
+ * Set the values the sidecar holds and delete the rows for the ones it lacks, so no all-null row
+ * is ever stored. Runs on the shared client, never inside a caller's transaction: reading a
+ * sidecar means S3 and ExifTool calls that must not hold a transaction (or a folder row lock) open.
+ */
 async function writeUpdates(
-  client: Client,
   assetId: string,
   updates: ReturnType<typeof xmpMetadataUpdates>,
 ): Promise<void> {
-  if (client === prisma) {
-    await metadataService.updateAssetMetadata(assetId, updates, true)
-  } else {
-    await metadataService.updateAssetMetadataInTx(
-      client as Prisma.TransactionClient,
-      assetId,
-      updates,
-      true,
-    )
+  const clearKeys = updates.filter((u) => u.value === null).map((u) => u.key)
+  const setUpdates = updates.filter((u) => u.value !== null)
+  if (clearKeys.length > 0) {
+    await prisma.assetMetadataValue.deleteMany({
+      where: { assetId, fieldKey: { in: clearKeys } },
+    })
+  }
+  if (setUpdates.length > 0) {
+    await metadataService.updateAssetMetadata(assetId, setUpdates, true)
   }
 }
 
@@ -61,8 +63,12 @@ async function loadSidecar(sidecar: {
 /**
  * Sync the sidecar values for the files that share a name stem with `assetId` (a media file or a
  * sidecar), in the same folder. Safe to call for any asset; it does nothing for folders.
+ *
+ * Do not call this inside a database transaction (it does storage and ExifTool I/O): collect the
+ * ids and call `syncXmpSidecarsAfterCommit` once the transaction has resolved.
  */
-export async function syncXmpSidecars(assetId: string, client: Client = prisma): Promise<void> {
+export async function syncXmpSidecars(assetId: string): Promise<void> {
+  const client = prisma
   const asset = await client.asset.findUnique({
     where: { id: assetId },
     select: {
@@ -123,7 +129,7 @@ export async function syncXmpSidecars(assetId: string, client: Client = prisma):
     if (!parsed.has(sidecarId)) parsed.set(sidecarId, await loadSidecar(byId.get(sidecarId)!))
     const xmp = parsed.get(sidecarId)
     if (xmp === undefined) continue
-    await writeUpdates(client, mediaId, xmpMetadataUpdates(xmp))
+    await writeUpdates(mediaId, xmpMetadataUpdates(xmp))
   }
 
   // Media that lost their sidecar: only touch the ones that still hold sidecar values.
@@ -142,16 +148,24 @@ export async function syncXmpSidecars(assetId: string, client: Client = prisma):
       distinct: ['assetId'],
     })
     for (const { assetId: staleId } of stale) {
-      await writeUpdates(client, staleId, xmpMetadataUpdates(null))
+      await writeUpdates(staleId, xmpMetadataUpdates(null))
     }
   }
 }
 
 /** Like `syncXmpSidecars` but never throws: sidecar trouble must not fail an upload or transcode. */
-export async function trySyncXmpSidecars(assetId: string, client: Client = prisma): Promise<void> {
+export async function trySyncXmpSidecars(assetId: string): Promise<void> {
   try {
-    await syncXmpSidecars(assetId, client)
+    await syncXmpSidecars(assetId)
   } catch (err) {
     logger.warn({ assetId, err }, 'Failed to sync XMP sidecar metadata')
   }
+}
+
+/**
+ * Sync in the background once the caller's transaction has committed. Fire-and-forget; failures
+ * are logged by `trySyncXmpSidecars`, never thrown.
+ */
+export function syncXmpSidecarsAfterCommit(assetId: string): void {
+  void trySyncXmpSidecars(assetId)
 }
