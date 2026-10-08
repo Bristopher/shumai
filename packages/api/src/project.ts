@@ -3,6 +3,7 @@ import { zValidator } from '@hono/zod-validator'
 import { authzService, Permission, ResourceType } from '@shumai/core/src/authz/authz'
 import { projectService } from '@shumai/core/src/project/project'
 import { assetService } from '@shumai/core/src/asset/asset'
+import { duplicateService } from '@shumai/core/src/asset/duplicates'
 import { reparentAssetsRequestSchema, copyAssetsRequestSchema } from '@shumai/dtos'
 import {
   createProjectRequestSchema,
@@ -14,6 +15,8 @@ import {
   addProjectMemberRequestSchema,
   listRecentsRequestSchema,
   recordRecentViewRequestSchema,
+  listDuplicatesRequestSchema,
+  checkDuplicatesRequestSchema,
 } from '@shumai/dtos'
 import { listMembersQuerySchema, AuditAction } from '@shumai/dtos'
 import type { Prisma } from '@shumai/db'
@@ -157,6 +160,42 @@ const route = new Hono<{ Variables: { user: User } }>()
 
       await assetService.recordRecentView(user.id, projectId, req.assetId)
       return c.json({ success: true })
+    },
+  )
+  .get(
+    '/projects/:projectId/duplicates',
+    zValidator('query', listDuplicatesRequestSchema),
+    async (c) => {
+      const projectId = c.req.param('projectId')
+      const user = c.get('user')
+      const req = c.req.valid('query')
+
+      await authzService.hasPermission({
+        user,
+        permission: Permission.Read,
+        type: ResourceType.Project,
+        id: projectId,
+      })
+
+      return c.json(await duplicateService.listGroups(projectId, req.limit))
+    },
+  )
+  .post(
+    '/projects/:projectId/duplicates/check',
+    zValidator('json', checkDuplicatesRequestSchema),
+    async (c) => {
+      const projectId = c.req.param('projectId')
+      const user = c.get('user')
+      const req = c.req.valid('json')
+
+      await authzService.hasPermission({
+        user,
+        permission: Permission.Read,
+        type: ResourceType.Project,
+        id: projectId,
+      })
+
+      return c.json(await duplicateService.checkHashes(projectId, req.files))
     },
   )
   .post('/projects/:projectId/empty-trash', async (c) => {
