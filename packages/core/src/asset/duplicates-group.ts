@@ -84,3 +84,57 @@ export function groupDuplicateRows(
   groups.sort((a, b) => b.wastedBytes - a.wastedBytes || a.contentHash.localeCompare(b.contentHash))
   return groups
 }
+
+export interface ResolveRow {
+  id: string
+  contentHash: string | null
+  sizeByte: bigint | number
+}
+
+export type ResolvePlan = { ok: true; deleteIds: string[] } | { ok: false; message: string }
+
+/**
+ * Decides whether `deleteIds` may be deleted in favour of `keepId`. `rows` are the live files of the
+ * project that were found for those ids. Every id to delete must be among them and have exactly the
+ * keeper's content hash and size, and the keeper must itself be a hashed, live file. Nothing is
+ * deleted unless all of them pass, so a stale or tampered request removes nothing.
+ */
+export function planDuplicateResolution(
+  keepId: string,
+  deleteIds: string[],
+  rows: ResolveRow[],
+): ResolvePlan {
+  const unique = [...new Set(deleteIds)]
+  if (unique.length === 0) return { ok: false, message: 'Nothing to delete' }
+  if (unique.includes(keepId)) {
+    return { ok: false, message: 'The file to keep cannot also be deleted' }
+  }
+
+  const byId = new Map(rows.map((r) => [r.id, r]))
+  const keeper = byId.get(keepId)
+  if (!keeper) {
+    return { ok: false, message: 'The file to keep was not found in this project or is deleted' }
+  }
+  if (!keeper.contentHash) {
+    return { ok: false, message: 'The file to keep has no content hash yet' }
+  }
+
+  const missing = unique.filter((id) => !byId.has(id))
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      message: `Not found in this project or already deleted: ${missing.join(', ')}`,
+    }
+  }
+  const different = unique.filter((id) => {
+    const r = byId.get(id)!
+    return r.contentHash !== keeper.contentHash || Number(r.sizeByte) !== Number(keeper.sizeByte)
+  })
+  if (different.length > 0) {
+    return {
+      ok: false,
+      message: `Not an exact copy of the file to keep: ${different.join(', ')}`,
+    }
+  }
+  return { ok: true, deleteIds: unique }
+}

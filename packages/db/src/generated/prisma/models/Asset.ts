@@ -6977,7 +6977,7 @@ export type $AssetPayload<ExtArgs extends runtime.Types.Extensions.InternalArgs 
     fileCount: number
     sizeByte: bigint
     /**
-     * SHA-256 (hex) of the original file, set once post-upload processing has read the object
+     * SHA-256 (lowercase hex) of the original file. Null until it has been computed, and for folders and symlinks.
      */
     contentHash: string | null
     status: $Enums.AssetStatus

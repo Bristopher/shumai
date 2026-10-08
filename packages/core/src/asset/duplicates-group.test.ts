@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildFolderPath,
   groupDuplicateRows,
+  planDuplicateResolution,
   type DuplicateRow,
   type FolderRef,
 } from './duplicates-group'
@@ -78,5 +79,63 @@ describe('groupDuplicateRows', () => {
     const [group] = groupDuplicateRows(rows, folders)
     expect(group.assets[0].sizeByte).toBe(7)
     expect(group.assets[0].createdAt).toBe('2026-01-01T00:00:00.000Z')
+  })
+})
+
+describe('planDuplicateResolution', () => {
+  const HASH = 'a'.repeat(64)
+  const r = (id: string, over: { contentHash?: string | null; sizeByte?: number } = {}) => ({
+    id,
+    contentHash: HASH,
+    sizeByte: 100,
+    ...over,
+  })
+
+  it('accepts exact copies of a hashed keeper and returns each id once', () => {
+    const plan = planDuplicateResolution('k', ['b', 'c', 'b'], [r('k'), r('b'), r('c')])
+    expect(plan).toEqual({ ok: true, deleteIds: ['b', 'c'] })
+  })
+
+  it('rejects a copy with a different hash and names it', () => {
+    const plan = planDuplicateResolution(
+      'k',
+      ['b', 'c'],
+      [r('k'), r('b'), r('c', { contentHash: 'b'.repeat(64) })],
+    )
+    expect(plan).toMatchObject({ ok: false })
+    expect(!plan.ok && plan.message).toContain('c')
+    expect(!plan.ok && plan.message).not.toContain('b,')
+  })
+
+  it('rejects a copy with the same hash but a different size', () => {
+    const plan = planDuplicateResolution('k', ['b'], [r('k'), r('b', { sizeByte: 101 })])
+    expect(plan.ok).toBe(false)
+  })
+
+  it('rejects ids that are not live files of the project (not in the rows)', () => {
+    const plan = planDuplicateResolution('k', ['b', 'ghost'], [r('k'), r('b')])
+    expect(plan).toMatchObject({ ok: false })
+    expect(!plan.ok && plan.message).toContain('ghost')
+  })
+
+  it('rejects a missing keeper and a keeper without a hash', () => {
+    expect(planDuplicateResolution('k', ['b'], [r('b')]).ok).toBe(false)
+    expect(planDuplicateResolution('k', ['b'], [r('k', { contentHash: null }), r('b')]).ok).toBe(
+      false,
+    )
+  })
+
+  it('never lets a copy with no hash match a keeper with no hash', () => {
+    const plan = planDuplicateResolution(
+      'k',
+      ['b'],
+      [r('k', { contentHash: null }), r('b', { contentHash: null })],
+    )
+    expect(plan.ok).toBe(false)
+  })
+
+  it('rejects deleting the keeper itself and an empty delete list', () => {
+    expect(planDuplicateResolution('k', ['k'], [r('k')]).ok).toBe(false)
+    expect(planDuplicateResolution('k', [], [r('k')]).ok).toBe(false)
   })
 })

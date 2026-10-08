@@ -16,7 +16,7 @@ import {
   listRecentsRequestSchema,
   recordRecentViewRequestSchema,
   listDuplicatesRequestSchema,
-  checkDuplicatesRequestSchema,
+  resolveDuplicatesRequestSchema,
 } from '@shumai/dtos'
 import { listMembersQuerySchema, AuditAction } from '@shumai/dtos'
 import type { Prisma } from '@shumai/db'
@@ -181,8 +181,8 @@ const route = new Hono<{ Variables: { user: User } }>()
     },
   )
   .post(
-    '/projects/:projectId/duplicates/check',
-    zValidator('json', checkDuplicatesRequestSchema),
+    '/projects/:projectId/duplicates/resolve',
+    zValidator('json', resolveDuplicatesRequestSchema),
     async (c) => {
       const projectId = c.req.param('projectId')
       const user = c.get('user')
@@ -194,8 +194,37 @@ const route = new Hono<{ Variables: { user: User } }>()
         type: ResourceType.Project,
         id: projectId,
       })
+      // The keeper only has to be readable; every copy that goes to trash needs edit rights.
+      await authzService.hasPermission({
+        user,
+        permission: Permission.Read,
+        type: ResourceType.Asset,
+        id: req.keepId,
+      })
+      for (const id of req.deleteIds) {
+        await authzService.hasPermission({
+          user,
+          permission: Permission.Edit,
+          type: ResourceType.Asset,
+          id,
+        })
+      }
 
-      return c.json(await duplicateService.checkHashes(projectId, req.files))
+      // Validates server side that every id is a live copy of the keeper before deleting anything.
+      const result = await duplicateService.resolveGroup(projectId, req.keepId, req.deleteIds)
+
+      const teamId = await projectService.getProjectTeam(projectId)
+      for (const id of result.deletedIds) {
+        await auditLogService.logAction({
+          action: AuditAction.file_delete,
+          teamId,
+          userId: user.id,
+          projectId,
+          itemId: id,
+        })
+      }
+
+      return c.json(result)
     },
   )
   .post('/projects/:projectId/empty-trash', async (c) => {

@@ -1506,7 +1506,7 @@
   "duplicates": "重复文件",
   "duplicates_description": "此项目中内容完全相同的文件。选择要移除的副本;确认之前不会删除任何内容。",
   "duplicates_none": "未发现重复文件。",
-  "duplicates_not_hashed_hint": "仅比较在此功能上线后完成处理的文件。",
+  "duplicates_not_hashed_hint": "仅比较在此功能上线后完成处理的视频、音频、图片和 PDF 文件。",
   "duplicates_summary": "{groups} 组,可释放 {size}",
   "duplicates_copies": "{count} 个副本,每个 {size}",
   "duplicates_select_extra": "选择多余副本",
@@ -1518,5 +1518,6 @@
   "duplicates_deleted": "已删除 {count} 个重复文件",
   "duplicates_failed_load": "加载重复文件失败",
   "duplicates_truncated": "仅显示浪费空间最多的分组。",
-  "duplicates_root_path": "项目根目录"
+  "duplicates_root_path": "项目根目录",
+  "duplicates_group_changed": "自加载列表以来这些重复文件已发生变化。该组未删除任何内容;请重新打开列表后重试。"
 }

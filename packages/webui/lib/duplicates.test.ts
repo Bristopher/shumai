@@ -1,6 +1,7 @@
 import type { DuplicateGroup } from '@shumai/dtos'
 import { describe, expect, it } from 'vitest'
 import {
+  buildResolveRequests,
   pruneSelection,
   selectedBytes,
   selectExtraCopies,
@@ -34,6 +35,22 @@ describe('duplicate selection helpers', () => {
     expect(selectionRemovesAllCopies(groups, new Set(['b', 'c', 'e']))).toBe(false)
     expect(selectionRemovesAllCopies(groups, new Set(['d', 'e']))).toBe(true)
     expect(selectionRemovesAllCopies(groups, new Set())).toBe(false)
+  })
+
+  it('builds one resolve request per group, keeping the first unselected copy', () => {
+    expect(buildResolveRequests(groups, new Set(['b', 'c', 'e']))).toEqual([
+      { keepId: 'a', deleteIds: ['b', 'c'] },
+      { keepId: 'd', deleteIds: ['e'] },
+    ])
+    // the oldest copy may be the one deleted; the next unselected copy is kept instead
+    expect(buildResolveRequests(groups, new Set(['a']))).toEqual([
+      { keepId: 'b', deleteIds: ['a'] },
+    ])
+  })
+
+  it('builds no request for untouched groups or a group with every copy selected', () => {
+    expect(buildResolveRequests(groups, new Set())).toEqual([])
+    expect(buildResolveRequests(groups, new Set(['d', 'e']))).toEqual([])
   })
 
   it('sums selected sizes and prunes ids that are gone', () => {

@@ -530,7 +530,7 @@ model Asset {
   mediaType         String?      @map("media_type")
   fileCount         Int          @default(0) @map("file_count")
   sizeByte          BigInt       @default(0) @map("size_byte")
-  /// SHA-256 (hex) of the original file, set once post-upload processing has read the object
+  /// SHA-256 (lowercase hex) of the original file. Null until it has been computed, and for folders and symlinks.
   contentHash       String?      @map("content_hash")
   status            AssetStatus
   transcodeTaskId   String?      @map("transcode_task_id")

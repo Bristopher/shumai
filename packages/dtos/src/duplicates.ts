@@ -1,11 +1,5 @@
 import { z } from 'zod'
 
-/** SHA-256 digest as 64 hex characters; normalised to lowercase to match what is stored. */
-export const contentHashSchema = z
-  .string()
-  .regex(/^[0-9a-fA-F]{64}$/, 'Must be a 64 character SHA-256 hex digest')
-  .transform((v) => v.toLowerCase())
-
 export const duplicateAssetInfoSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -39,27 +33,25 @@ export const listDuplicatesResponseSchema = z.object({
 })
 export type ListDuplicatesResponse = z.infer<typeof listDuplicatesResponseSchema>
 
-export const MAX_DUPLICATE_CHECK_FILES = 100
+export const MAX_RESOLVE_DELETE_IDS = 200
 
-export const checkDuplicatesRequestSchema = z.object({
-  files: z
-    .array(
-      z.object({
-        sizeByte: z.number().int().nonnegative(),
-        contentHash: contentHashSchema,
-      }),
-    )
-    .min(1)
-    .max(MAX_DUPLICATE_CHECK_FILES),
-})
-export type CheckDuplicatesRequest = z.infer<typeof checkDuplicatesRequestSchema>
+/**
+ * Deletes extra copies of one duplicate group. The server checks that every id in `deleteIds` has the
+ * same stored content hash as `keepId` before anything is moved to trash.
+ */
+export const resolveDuplicatesRequestSchema = z
+  .object({
+    keepId: z.string().min(1),
+    deleteIds: z.array(z.string().min(1)).min(1).max(MAX_RESOLVE_DELETE_IDS),
+  })
+  .refine((v) => !v.deleteIds.includes(v.keepId), {
+    message: 'keepId must not be one of deleteIds',
+    path: ['deleteIds'],
+  })
+export type ResolveDuplicatesRequest = z.infer<typeof resolveDuplicatesRequestSchema>
 
-export const checkDuplicatesResponseSchema = z.object({
-  matches: z.array(
-    z.object({
-      contentHash: z.string(),
-      assets: z.array(duplicateAssetInfoSchema),
-    }),
-  ),
+export const resolveDuplicatesResponseSchema = z.object({
+  /** Ids moved to trash. */
+  deletedIds: z.array(z.string()),
 })
-export type CheckDuplicatesResponse = z.infer<typeof checkDuplicatesResponseSchema>
+export type ResolveDuplicatesResponse = z.infer<typeof resolveDuplicatesResponseSchema>

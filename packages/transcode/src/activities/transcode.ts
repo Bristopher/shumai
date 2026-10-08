@@ -83,9 +83,11 @@ async function ensureAssetNotPurging(assetKey: string): Promise<void> {
 }
 
 /**
- * Streams the already-downloaded original once and stores its SHA-256 on the asset so exact
- * duplicates can be found later. Never fails processing: a missing hash only means the asset is
- * skipped by duplicate detection until it is reprocessed.
+ * Streams the downloaded ORIGINAL once and stores its SHA-256 on the asset so exact duplicates can
+ * be found later. Only ever called with the file fetched from storage, never with a derived file
+ * (for example the PDF generated from an Office document or HTML page), because two different
+ * originals can produce byte-identical derived files. Never fails processing: a missing hash only
+ * means the asset is skipped by duplicate detection until it is reprocessed.
  */
 async function recordContentHash(assetId: string, filePath: string): Promise<void> {
   try {
@@ -95,7 +97,7 @@ async function recordContentHash(assetId: string, filePath: string): Promise<voi
       data: { contentHash },
     })
   } catch (err) {
-    logger.warn({ err, assetId }, '[getMediaInfoActivity] Failed to record content hash')
+    logger.warn({ err, assetId }, '[downloadMediaToTmpActivity] Failed to record content hash')
   }
 }
 
@@ -105,7 +107,6 @@ export async function getMediaInfoActivity(params: {
   proxyType?: 'image' | 'video' | 'audio' | 'pdf' | null
   mediaType?: string
 }): Promise<PrismaJson.MediaInfo> {
-  await recordContentHash(params.assetId, params.filePath)
   try {
     const proxyType =
       params.proxyType || getProxyType(params.mediaType, params.filePath) || undefined
@@ -1042,6 +1043,8 @@ export async function generatePdfProxyActivity(
 
 export async function downloadMediaToTmpActivity(params: {
   assetKey: string
+  /** When given, the SHA-256 of the downloaded original is recorded on this asset. */
+  assetId?: string
 }): Promise<{ filePath: string; tmpDir: string }> {
   const bucket = process.env.S3_BUCKET || 'shumai'
   const tmpDir = transcodeService.createTempDir('transcode-')
@@ -1065,6 +1068,8 @@ export async function downloadMediaToTmpActivity(params: {
     }
     throw err
   }
+
+  if (params.assetId) await recordContentHash(params.assetId, filePath)
 
   return { filePath, tmpDir }
 }

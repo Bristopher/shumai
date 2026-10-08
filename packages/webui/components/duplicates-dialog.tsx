@@ -22,12 +22,14 @@ import {
 import { ScrollArea } from '@/ui/components/ui/scroll-area'
 import { formatSize } from '@/ui/lib/format'
 import {
+  buildResolveRequests,
   pruneSelection,
   selectedBytes,
   selectExtraCopies,
   selectionRemovesAllCopies,
 } from '@/ui/lib/duplicates'
 import { m } from '@/ui/paraglide/messages.js'
+import type { ResolveDuplicatesRequest } from '@shumai/dtos'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
@@ -40,6 +42,9 @@ interface DuplicatesDialogProps {
 }
 
 const GROUP_LIMIT = 50
+
+/** The server refused a group because it no longer matches what was listed (HTTP 409). */
+class DuplicatesChangedError extends Error {}
 
 export function DuplicatesDialog({ projectId, open, onOpenChange }: DuplicatesDialogProps) {
   const queryClient = useQueryClient()
@@ -68,23 +73,40 @@ export function DuplicatesDialog({ projectId, open, onOpenChange }: DuplicatesDi
     setSelected((prev) => pruneSelection(groups, prev))
   }, [groups])
 
+  // One request per group. The server checks that every file to delete is an exact copy of the one
+  // kept (same hash and size, live, in this project) and refuses the whole group otherwise.
   const { mutate: deleteSelected, isPending } = useMutation({
-    mutationFn: async (ids: string[]) => {
-      const res = await client.api.files.$delete({ json: { ids } })
-      if (!res.ok) throw new Error('Failed to delete')
-      return ids.length
+    mutationFn: async (requests: ResolveDuplicatesRequest[]) => {
+      let deleted = 0
+      for (const json of requests) {
+        const res = await client.api.projects[':projectId'].duplicates.resolve.$post({
+          param: { projectId },
+          json,
+        })
+        if (res.status === 409) throw new DuplicatesChangedError()
+        if (!res.ok) throw new Error('Failed to delete')
+        deleted += (await res.json()).deletedIds.length
+      }
+      return deleted
     },
     onSuccess: (count) => {
       toast.success(m.duplicates_deleted({ count }))
       setSelected(new Set())
       setConfirmOpen(false)
+    },
+    onError: (err) => {
+      toast.error(
+        err instanceof DuplicatesChangedError
+          ? m.duplicates_group_changed()
+          : `Error: ${err.message}`,
+      )
+      setConfirmOpen(false)
+    },
+    // Some groups may already have been resolved, so refresh the list on success and on failure.
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey })
       queryClient.invalidateQueries({ queryKey: ['folders'] })
       queryClient.invalidateQueries({ queryKey: ['projects', projectId, 'recently-deleted'] })
-    },
-    onError: (err) => {
-      toast.error(`Error: ${err.message}`)
-      setConfirmOpen(false)
     },
   })
 
@@ -216,7 +238,7 @@ export function DuplicatesDialog({ projectId, open, onOpenChange }: DuplicatesDi
               disabled={isPending}
               onClick={(e) => {
                 e.preventDefault()
-                deleteSelected([...selected])
+                deleteSelected(buildResolveRequests(groups, selected))
               }}
             >
               {m.delete()}

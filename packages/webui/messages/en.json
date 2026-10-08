@@ -1506,7 +1506,7 @@
   "duplicates": "Duplicates",
   "duplicates_description": "Files in this project with identical content. Pick the copies you want to remove; nothing is deleted until you confirm.",
   "duplicates_none": "No duplicate files found.",
-  "duplicates_not_hashed_hint": "Only files that finished processing after this feature was added are compared.",
+  "duplicates_not_hashed_hint": "Only video, audio, image and PDF files that finished processing after this feature was added are compared.",
   "duplicates_summary": "{groups} groups, {size} could be freed",
   "duplicates_copies": "{count} copies of {size}",
   "duplicates_select_extra": "Select extra copies",
@@ -1518,5 +1518,6 @@
   "duplicates_deleted": "{count} duplicate files deleted",
   "duplicates_failed_load": "Failed to load duplicates",
   "duplicates_truncated": "Showing the groups that waste the most space.",
-  "duplicates_root_path": "Project root"
+  "duplicates_root_path": "Project root",
+  "duplicates_group_changed": "These duplicates changed since the list was loaded. Nothing was deleted for that group; reopen the list and try again."
 }
