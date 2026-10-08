@@ -2,6 +2,7 @@ import { Prisma } from '@shumai/db'
 import {
   SearchCondition,
   expandFileTypes,
+  FILE_TYPE_EXTENSION_PATTERN,
   type FileTypeCountsRequest,
   type FileTypeFilter,
 } from '@shumai/dtos'
@@ -59,8 +60,7 @@ export class SqlQueryBuilder {
   addFileTypeFilter(filter?: FileTypeFilter): this {
     const include = expandFileTypes(filter?.include)
     const exclude = expandFileTypes(filter?.exclude)
-    // The SQL regex is '\.([^.]+)$': the backslash is doubled for the template literal.
-    const ext = Prisma.sql`lower(substring(a.name from '\\.([^.]+)$'))`
+    const ext = FILE_EXTENSION_SQL
     if (include.length > 0) {
       this.addWhere(Prisma.sql`${ext} = ANY(${include}::text[])`)
     }
@@ -439,6 +439,12 @@ export class SqlQueryBuilder {
   }
 }
 
+/**
+ * A file name's last extension, lowercase; NULL when there is none. The stem must be non-empty,
+ * so ".jpg" (a dotfile) has no extension. The backslash is doubled for the template literal.
+ */
+const FILE_EXTENSION_SQL = Prisma.sql`lower(substring(a.name from '^.+\\.([^.]+)$'))`
+
 /** Most distinct extensions a folder's count list returns. */
 export const FILE_TYPE_COUNTS_LIMIT = 500
 
@@ -453,7 +459,7 @@ export function buildFileTypeCountsQuery(
 ): Prisma.Sql {
   const fileTypes = ['file', 'version_stack']
   const builder = new SqlQueryBuilder()
-    .select(Prisma.sql`lower(substring(a.name from '\\.([^.]+)$')) AS extension, count(*) AS count`)
+    .select(Prisma.sql`${FILE_EXTENSION_SQL} AS extension, count(*) AS count`)
     .from(Prisma.sql`assets a`)
     .addWhere(Prisma.sql`a.is_deleted = false`)
     .addWhere(Prisma.sql`a.parent_id = ANY(${[...folderIds]})`)
@@ -478,6 +484,12 @@ export function buildFileTypeCountsQuery(
     if (ngrams.length > 0) builder.addWhere(Prisma.sql`a.name_ngram @> ${ngrams}::text[]`)
     builder.addWhere(Prisma.sql`a.name ILIKE ${'%' + valStr + '%'}`)
   }
+
+  // Only offer extensions the filter can send back (fileTypeTokenSchema), else picking one would
+  // make every search fail. Files with no extension stay in the list as the "(none)" row.
+  builder.addWhere(
+    Prisma.sql`(${FILE_EXTENSION_SQL} IS NULL OR ${FILE_EXTENSION_SQL} ~ ${FILE_TYPE_EXTENSION_PATTERN})`,
+  )
 
   return builder
     .groupBy(Prisma.sql`1`)

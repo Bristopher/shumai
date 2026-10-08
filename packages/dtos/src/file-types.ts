@@ -5,28 +5,40 @@ import { z } from 'zod'
  * groups ("group:raw"); the server expands groups and matches the file name's last extension,
  * case-insensitively.
  */
+
+/**
+ * Canonical camera RAW extensions (lowercase, no dot). The file-type filter's RAW group and
+ * core's `isRawImage` both read this list, so the two cannot drift apart.
+ */
+export const RAW_EXTENSIONS = [
+  '3fr',
+  'arw',
+  'cr2',
+  'cr3',
+  'crw',
+  'dcr',
+  'dng',
+  'erf',
+  'fff',
+  'iiq',
+  'kdc',
+  'nef',
+  'nrw',
+  'orf',
+  'pef',
+  'raf',
+  'raw',
+  'rw2',
+  'rwl',
+  'sr2',
+  'srf',
+  'srw',
+  'x3f',
+] as const
+
 export const FILE_TYPE_GROUPS = {
-  /** Camera RAW formats. */
-  raw: [
-    'raf',
-    'arw',
-    'srf',
-    'sr2',
-    'dng',
-    'cr2',
-    'cr3',
-    'crw',
-    'nef',
-    'nrw',
-    'orf',
-    'rw2',
-    'pef',
-    'srw',
-    'x3f',
-    '3fr',
-    'iiq',
-    'rwl',
-  ],
+  /** Camera RAW formats: the one list in `RAW_EXTENSIONS`. */
+  raw: RAW_EXTENSIONS,
   jpeg: ['jpg', 'jpeg'],
   heif: ['heic', 'heif', 'hif'],
   video: ['mov', 'mp4', 'm4v', 'mkv', 'avi', 'mts', 'm2ts', 'mxf', 'webm'],
@@ -40,6 +52,9 @@ export const FILE_TYPE_GROUPS = {
 export type FileTypeGroup = keyof typeof FILE_TYPE_GROUPS
 
 export const FILE_TYPE_GROUP_PREFIX = 'group:'
+
+/** What an extension token may look like. The counts endpoint only offers extensions matching it. */
+export const FILE_TYPE_EXTENSION_PATTERN = '^[a-z0-9]{1,10}$'
 
 const fileTypeTokenSchema = z
   .string()
@@ -58,6 +73,32 @@ export const fileTypeFilterSchema = z.object({
 })
 export type FileTypeFilter = z.infer<typeof fileTypeFilterSchema>
 
+/**
+ * Drop the tokens a filter cannot send (an extension like "tar-gz" or one longer than 10
+ * characters, an unknown group, anything not a string) and normalise the rest. Used on a filter
+ * remembered by an older version or hand-edited, so it can never make every search fail.
+ */
+export function sanitizeFileTypeFilter(value: unknown): FileTypeFilter {
+  const clean = (list: unknown): string[] | undefined => {
+    if (!Array.isArray(list)) return undefined
+    const out = new Set<string>()
+    for (const item of list) {
+      const parsed = fileTypeTokenSchema.safeParse(item)
+      if (!parsed.success) continue
+      const token = parsed.data
+      if (token.startsWith(FILE_TYPE_GROUP_PREFIX)) {
+        if (!Object.hasOwn(FILE_TYPE_GROUPS, token.slice(FILE_TYPE_GROUP_PREFIX.length))) continue
+      }
+      out.add(token)
+    }
+    return out.size > 0 ? [...out].slice(0, 64) : undefined
+  }
+  const src = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>
+  const include = clean(src.include)
+  const exclude = clean(src.exclude)
+  return { ...(include && { include }), ...(exclude && { exclude }) }
+}
+
 /** Expand groups into their extensions; drop unknown groups; de-duplicate. Lowercase output. */
 export function expandFileTypes(tokens: readonly string[] | undefined): string[] {
   const out = new Set<string>()
@@ -65,7 +106,9 @@ export function expandFileTypes(tokens: readonly string[] | undefined): string[]
     const t = raw.trim().toLowerCase().replace(/^\./, '')
     if (t.startsWith(FILE_TYPE_GROUP_PREFIX)) {
       const group = t.slice(FILE_TYPE_GROUP_PREFIX.length) as FileTypeGroup
-      for (const ext of FILE_TYPE_GROUPS[group] ?? []) out.add(ext)
+      // hasOwn: a made-up group such as "group:constructor" must not reach Object.prototype.
+      if (Object.hasOwn(FILE_TYPE_GROUPS, group))
+        for (const ext of FILE_TYPE_GROUPS[group]) out.add(ext)
     } else if (t) {
       out.add(t)
     }

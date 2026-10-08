@@ -1182,4 +1182,27 @@ describe('SearchService — file-type filter', () => {
     const deep = await searchService.fileTypeCounts(rootId, { recursively: true })
     expect(deep.find((c) => c.extension === 'raf')?.count).toBe(2)
   })
+
+  it('offers only extensions the filter accepts, and treats a dotfile as extensionless', async () => {
+    const root = await prisma.asset.findUniqueOrThrow({ where: { id: rootId } })
+    for (const name of ['backup.tar-gz', 'x.averyveryverylongextension', '.jpg', 'a.b.TIFF']) {
+      await prisma.asset.create({
+        data: {
+          name,
+          type: AssetType.file,
+          projectId: root.projectId,
+          parentId: rootId,
+          status: 'processed',
+        },
+      })
+    }
+    const counts = await searchService.fileTypeCounts(rootId)
+    const exts = counts.map((c) => c.extension)
+    expect(exts).not.toContain('tar-gz')
+    expect(exts).not.toContain('averyveryverylongextension')
+    expect(counts.find((c) => c.extension === 'tiff')?.count).toBe(1)
+    // "notes" and ".jpg" have no extension; ".jpg" is not a JPEG.
+    expect(counts.find((c) => c.extension === '')?.count).toBe(2)
+    expect(counts.find((c) => c.extension === 'jpg')?.count).toBe(1)
+  })
 })

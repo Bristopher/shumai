@@ -9,7 +9,7 @@ import {
 } from '@shumai/dtos'
 import { useQuery } from '@tanstack/react-query'
 import { FileType } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { client } from '@/ui/api/client'
 import { Badge } from '@/ui/components/ui/badge'
 import { Button } from '@/ui/components/ui/button'
@@ -22,7 +22,7 @@ import { cn } from '@/ui/lib/utils'
 import { m } from '@/ui/paraglide/messages.js'
 import { getLocale } from '@/ui/paraglide/runtime.js'
 import { useUserMetadataStore } from '@/ui/stores/user-metadata'
-import { formatFileCount } from './file-type-counts'
+import { cleanPersistedFileTypes, formatFileCount } from './file-type-counts'
 
 /** Where the file-type filter is remembered: per user, per project, like the sort order. */
 export const fileTypeMetadataKey = (projectId: string) => `project:${projectId}:fileTypes`
@@ -61,7 +61,12 @@ export function FileTypeFilter({
   const { metadata, setMetadata } = useUserMetadataStore()
   const [open, setOpen] = useState(false)
   const key = fileTypeMetadataKey(projectId)
-  const value = (metadata[key] as FileTypeFilterValue | undefined) ?? {}
+  // A remembered filter can hold tokens the server rejects; drop them and heal the stored value.
+  const stored = metadata[key]
+  const { value, changed } = useMemo(() => cleanPersistedFileTypes(stored), [stored])
+  useEffect(() => {
+    if (changed) setMetadata(teamId, key, value)
+  }, [changed, value, setMetadata, teamId, key])
   const include = value.include ?? []
   const exclude = value.exclude ?? []
   const hideEditing = exclude.includes(EDITING)

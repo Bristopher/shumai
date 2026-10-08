@@ -9,7 +9,8 @@ import type {
   SearchSort,
 } from '@shumai/dtos'
 import { type FieldInfo as MetadataFieldInfo } from '@shumai/dtos'
-import { isFileTypeFilterActive, type FileTypeFilter as FileTypeFilterValue } from '@shumai/dtos'
+import { isFileTypeFilterActive } from '@shumai/dtos'
+import { cleanPersistedFileTypes } from './search/file-type-counts'
 import { fileTypeMetadataKey } from './search/file-type-filter'
 import { useMutation } from '@tanstack/react-query'
 import { InferRequestType, InferResponseType } from 'hono/client'
@@ -133,7 +134,8 @@ export default function FileSystemManager({
 
   // File-type filter (FileTypeFilter in the toolbar). It narrows files in place and, unlike
   // filterConditions, does not switch the browser into a flat recursive search.
-  const fileTypes = metadata[fileTypeMetadataKey(projectId)] as FileTypeFilterValue | undefined
+  const storedFileTypes = metadata[fileTypeMetadataKey(projectId)]
+  const fileTypes = useMemo(() => cleanPersistedFileTypes(storedFileTypes).value, [storedFileTypes])
   const activeFileTypes = isFileTypeFilterActive(fileTypes) ? fileTypes : undefined
 
   const isCollection = !!collection
