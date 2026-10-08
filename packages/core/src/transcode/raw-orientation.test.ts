@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import sharp from 'sharp'
-import { EXIF_ORIENTATION_TO_ROTATION } from './raw-extract'
+import { applyRawOrientation } from './raw-extract'
 
 // Real sharp (no mocks): the mapping must produce the same pixels as sharp's own
 // EXIF auto-orientation, which is what a non-RAW image gets.
@@ -35,12 +35,7 @@ describe('EXIF_ORIENTATION_TO_ROTATION matches sharp auto-orientation', () => {
     const expected = await toRaw(sharp(jpeg).rotate())
 
     // Under test: ignore the tag (as with an extracted RAW preview) and apply the mapping.
-    const { angle, flip, flop } = EXIF_ORIENTATION_TO_ROTATION[orientation]
-    const pipeline = sharp(jpeg)
-    if (angle) pipeline.rotate(angle)
-    if (flip) pipeline.flip()
-    if (flop) pipeline.flop()
-    const actual = await toRaw(pipeline)
+    const actual = await toRaw(applyRawOrientation(sharp(jpeg), orientation))
 
     expect(actual.width).toBe(expected.width)
     expect(actual.height).toBe(expected.height)
@@ -50,12 +45,7 @@ describe('EXIF_ORIENTATION_TO_ROTATION matches sharp auto-orientation', () => {
   it('swaps dimensions only for orientations 5 to 8', async () => {
     for (let orientation = 1; orientation <= 8; orientation++) {
       const jpeg = await makeJpegWithOrientation(orientation)
-      const { angle, flip, flop } = EXIF_ORIENTATION_TO_ROTATION[orientation]
-      const pipeline = sharp(jpeg)
-      if (angle) pipeline.rotate(angle)
-      if (flip) pipeline.flip()
-      if (flop) pipeline.flop()
-      const { width, height } = await toRaw(pipeline)
+      const { width, height } = await toRaw(applyRawOrientation(sharp(jpeg), orientation))
       const swapped = orientation >= 5
       expect([width, height]).toEqual(swapped ? [HEIGHT, WIDTH] : [WIDTH, HEIGHT])
     }

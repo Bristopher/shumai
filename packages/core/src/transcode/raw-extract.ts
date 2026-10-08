@@ -56,6 +56,24 @@ export const EXIF_ORIENTATION_TO_ROTATION: Record<
   8: { angle: 270 }, // Rotate 270° CW
 }
 
+/**
+ * Applies the mapped EXIF orientation to a sharp pipeline, in the order sharp needs
+ * (rotate, flip, flop). Shared by the transcoder and raw-orientation.test.ts so the
+ * test exercises the production ordering. A no-op for unknown or normal orientations.
+ */
+export function applyRawOrientation<T extends ReturnType<typeof sharp>>(
+  pipeline: T,
+  orientation: number | undefined,
+): T {
+  const rotation = orientation ? EXIF_ORIENTATION_TO_ROTATION[orientation] : undefined
+  if (!rotation) return pipeline
+  const { angle, flip, flop } = rotation
+  if (angle) pipeline.rotate(angle)
+  if (flip) pipeline.flip()
+  if (flop) pipeline.flop()
+  return pipeline
+}
+
 const DEFAULT_EXIFTOOL_TIMEOUT_MS = 15_000
 
 function getExifToolTimeoutMs(): number {
