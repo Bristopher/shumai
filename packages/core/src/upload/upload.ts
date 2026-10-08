@@ -21,6 +21,8 @@ import { gotenbergService } from '@shumai/core/src/gotenberg/gotenberg'
 import { sanitizeFilename } from '@shumai/core/src/utils/filename'
 import { getProxyType, isHtmlDocument, isOfficeDocument } from '@shumai/core/src/utils/mime'
 import { logger } from '@shumai/core/src/logger'
+import { isXmpSidecarName } from '@shumai/core/src/metadata/xmp-sidecar'
+import { trySyncXmpSidecars } from '@shumai/core/src/metadata/xmp-sidecar-sync'
 
 export class UploadService {
   constructor(private readonly prismaClient: typeof prisma = prisma) {}
@@ -314,6 +316,9 @@ export class UploadService {
       where: { id: teamId },
     })
     if (!team) throw new Error('Team not found')
+
+    // A sidecar carries the rating, label and keywords of the photo next to it.
+    if (isXmpSidecarName(asset.name)) await trySyncXmpSidecars(asset.id, tx)
 
     const proxyType =
       (asset.media as PrismaJson.MediaInfo | null)?.proxyType ||

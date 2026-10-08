@@ -41,6 +41,8 @@ import {
 import { HTTPException } from 'hono/http-exception'
 import { logger } from '@shumai/core/src/logger'
 import { PaginatedData, paginateQuery, PaginationParams } from '@shumai/core/src/pagination'
+import { isXmpSidecarName } from '@shumai/core/src/metadata/xmp-sidecar'
+import { trySyncXmpSidecars } from '@shumai/core/src/metadata/xmp-sidecar-sync'
 import { s3Service } from '@shumai/core/src/s3/s3'
 import {
   ensureJpegInStorage,
@@ -1375,6 +1377,11 @@ export class AssetService {
         })
 
         await this.updateAncestorsSize(tx, a.parentId, -Number(a.sizeByte))
+
+        // The photo next to a trashed sidecar loses its rating, label and keywords.
+        if (a.type === AssetType.file && isXmpSidecarName(a.name)) {
+          await trySyncXmpSidecars(a.id, tx)
+        }
       })
     }
   }
@@ -1694,6 +1701,11 @@ export class AssetService {
         })
 
         await this.updateAncestorsSize(tx, a.parentId, Number(a.sizeByte))
+
+        // A restored sidecar gives its rating, label and keywords back to the photo next to it.
+        if (a.type === AssetType.file && isXmpSidecarName(a.name)) {
+          await trySyncXmpSidecars(a.id, tx)
+        }
       })
     }
   }
