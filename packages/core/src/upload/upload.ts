@@ -57,7 +57,9 @@ export class UploadService {
         type: 'upload',
         name: taskName,
         total,
-        status: TaskStatus.pending,
+        // Nothing to upload (only folders or dot-files): there is no file to confirm, so the task is
+        // already done rather than pending forever.
+        status: total === 0 ? TaskStatus.completed : TaskStatus.pending,
       },
     })
 
@@ -461,13 +463,18 @@ export class UploadService {
       if (asset.uploadId && asset.uploadId !== req.uploadId) {
         throw new Error('Upload ID does not match asset upload ID')
       }
-      if (!asset.uploadId) {
-        await this.prismaClient.asset.update({
-          where: { id: asset.id },
-          data: { uploadId: req.uploadId },
-        })
-      }
     }
+
+    // Every signing request is a sign of life from a multipart upload: each part and the final
+    // complete need a fresh URL. Bumping updatedAt keeps the stale sweep away from an upload that
+    // is still moving parts, however long it takes.
+    await this.prismaClient.asset.update({
+      where: { id: asset.id },
+      data: {
+        updatedAt: new Date(),
+        ...(req.uploadId && !asset.uploadId ? { uploadId: req.uploadId } : {}),
+      },
+    })
 
     const result = await s3Service.presignMultipart(bucket, key, req)
     return { url: result.url }
@@ -629,6 +636,8 @@ export class UploadService {
       where: {
         type: 'upload',
         status: { in: [TaskStatus.pending, TaskStatus.uploading] },
+        // A task with no files (total 0) has nothing to abandon.
+        total: { gt: 0 },
         updatedAt: { lt: cutoff },
         assets: { none: { status: AssetStatus.uploading } },
       },

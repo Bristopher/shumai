@@ -98,6 +98,19 @@ describe('UploadService', () => {
     expect(hidden).toBeNull()
   })
 
+  it('completes a task that has no files to upload instead of leaving it pending', async () => {
+    const resp = await uploadService.createUploadTask(userId, {
+      parentId,
+      files: [
+        { name: 'empty-folder', id: '1', size: 0, type: 'folder', children: [] },
+        { name: '.DS_Store', id: '2', size: 10, type: 'file', children: [] },
+      ],
+    })
+    const task = await prisma.task.findUnique({ where: { id: resp.taskId } })
+    expect(task?.total).toBe(0)
+    expect(task?.status).toBe(TaskStatus.completed)
+  })
+
   it('should correctly increment fileCount for parent folders when uploading folders', async () => {
     const req = {
       parentId: parentId,
@@ -1039,6 +1052,44 @@ describe('UploadService', () => {
 
       expect(await uploadService.abandonStaleUploads(24)).toEqual({ files: 0, tasks: 0 })
       expect(await prisma.asset.findUnique({ where: { id: waiting.id } })).not.toBeNull()
+    })
+
+    it('spares a multipart upload that keeps asking for part URLs', async () => {
+      const task = await uploadTask('big-multipart', TaskStatus.uploading)
+      const part = await placeholder('big.mov', task.id)
+      await age('assets', part.id, daysAgo(2))
+      await age('tasks', task.id, daysAgo(2))
+
+      await uploadService.signS3Upload(teamId, userId, {
+        key: 'files/stale/big.mov',
+        method: 'PUT',
+        uploadId: 'up-1',
+        partNumber: 7,
+        fileId: part.id,
+      })
+
+      expect(await uploadService.abandonStaleUploads(24)).toEqual({ files: 0, tasks: 0 })
+      const after = await prisma.asset.findUnique({ where: { id: part.id } })
+      expect(after).not.toBeNull()
+      expect(after!.updatedAt.getTime()).toBeGreaterThan(Date.now() - HOUR)
+    })
+
+    it('never fails a task that has no files (total 0)', async () => {
+      const task = await prisma.task.create({
+        data: {
+          creatorId: userId,
+          type: 'upload',
+          name: 'folders only',
+          total: 0,
+          status: TaskStatus.pending,
+        },
+      })
+      await age('tasks', task.id, daysAgo(3))
+
+      expect(await uploadService.abandonStaleUploads(24)).toEqual({ files: 0, tasks: 0 })
+      expect((await prisma.task.findUnique({ where: { id: task.id } }))?.status).toBe(
+        TaskStatus.pending,
+      )
     })
 
     it('fails an idle task that never got any files', async () => {

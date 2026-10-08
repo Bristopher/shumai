@@ -262,6 +262,14 @@ export async function uploadFilesWithUppy({
     }
   })
 
+  /** Marks a file failed, and retryable when its bytes are still in this tab. */
+  const failWithRetry = (fileId: string) => {
+    const source = sourceFileById.get(fileId)
+    const retryable = !!source && !!parentId
+    if (retryable) retryableUploads.set(fileId, { file: source, teamId, parentId })
+    failFile(taskId, fileId, { retryable })
+  }
+
   uppy.on('upload-success', (file) => {
     if (!file) return
     const fileId = file.meta.fileId as string
@@ -281,7 +289,9 @@ export async function uploadFilesWithUppy({
         await onFileFinished?.(fileId)
       } catch (err) {
         console.error('Failed to confirm upload:', err)
-        failFile(taskId, fileId)
+        // The bytes are still in this tab, so Retry can upload the file again (for example after
+        // the server discarded the placeholder because the confirmation came too late).
+        failWithRetry(fileId)
         decrement()
         toast.error(`Failed to confirm upload: ${file.name}`)
         await onFileFinished?.(fileId)
@@ -299,10 +309,7 @@ export async function uploadFilesWithUppy({
     const fileId = file.meta.fileId as string
     if (!activeUploads.has(fileId)) return
     activeUploads.delete(fileId)
-    const source = sourceFileById.get(fileId)
-    const retryable = !!source && !!parentId
-    if (retryable) retryableUploads.set(fileId, { file: source, teamId, parentId })
-    failFile(taskId, fileId, { retryable })
+    failWithRetry(fileId)
     decrement()
 
     toast.error(`Failed to upload file: ${file.name}`)
